@@ -1,0 +1,29 @@
+# ============================================================
+# 狼人杀 · 房间后端（Cloudflare Workers + Durable Objects）
+# ------------------------------------------------------------
+# 部署：在本目录 `npx wrangler deploy`（或仓库根 `npx wrangler deploy --config worker/wrangler.toml`）
+# 本地：`npx wrangler dev`（默认 http://localhost:8788，对应 [vars] 开发口）
+# 本目录不需要 package.json（母本同款，仅靠 wrangler.toml 即可部署）
+# ============================================================
+
+name = "werewolf-room"
+main = "src/index.js"
+compatibility_date = "2026-10-03"
+
+# Durable Object：一个房间 = 一个 DO 实例（游戏状态机与唯一权威，ADR-0001）
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+# DO 的 SQLite 存储后端（免费额度友好，无需额外付费）
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+# 前端允许跨域来源：GitHub Pages 站点 + 本地开发口（features.md §9）
+[vars]
+ALLOWED_ORIGINS = "https://xxx794665.github.io,http://localhost:8788"
+
+# 观测
+[observability]
+enabled = true
