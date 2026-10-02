@@ -1,0 +1,27 @@
+{
+  "name": "狼人杀",
+  "short_name": "狼人杀",
+  "description": "单机 / 联机狼人杀：1 真人 + 8 AI 扮演，或房间制联机 AI 补位。",
+  "lang": "zh-CN",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#15181d",
+  "theme_color": "#15181d",
+  "icons": [
+    {
+      "src": "assets/icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "assets/icons/maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

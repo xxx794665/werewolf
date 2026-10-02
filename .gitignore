@@ -1,0 +1,11 @@
+# 依赖与本地工具产物（零构建站，无 node_modules 也应能跑）
+node_modules/
+
+# wrangler 本地开发产物
+.wrangler/
+
+# Mimosa 安全扫描历史（本机产物，不入库）
+.mimosa/
+
+# ZCode 会话产物（.zcodeignore 保留入库，此目录本身不入库）
+.zcode/

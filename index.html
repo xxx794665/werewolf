@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="description" content="单机 / 联机狼人杀：1 真人 + 8 AI 扮演，或房间制联机 AI 补位。9 人标准局：3 狼、3 平民、预言家、女巫、猎人。">
+  <meta name="theme-color" content="#15181d">
+  <title>狼人杀</title>
+  <link rel="icon" href="assets/icons/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- 顶栏：吸顶 + 滚动收拢（js/ui.js initTopbar：滚动 >60px 加 .is-collapsed） -->
+  <header class="topbar" id="topbar">
+    <h1 class="topbar-title">狼人杀</h1>
+    <span class="topbar-sub" id="topbar-sub"></span><!-- js/app.js 切屏时更新（阶段名 / 房号） -->
+  </header>
+
+  <main id="main">
+
+    <!-- ============ 屏：主菜单（默认显示；其余 screen 默认 hidden，由 app.js 状态机切换） ============ -->
+    <section class="screen" id="screen-menu">
+      <h2 class="title">狼人杀</h2>
+      <p class="subtitle">9 人局：3 狼 · 3 平民 · 预言家 · 女巫 · 猎人</p>
+      <nav class="menu">
+        <!-- js/app.js bind()：data-goto 统一切屏 -->
+        <button class="btn btn-primary" type="button" data-goto="screen-solo">单机开局（1 真人 + 8 AI）</button>
+        <button class="btn" type="button" data-goto="screen-online">联机房间</button>
+        <button class="btn" type="button" data-goto="screen-settings">AI 设置</button>
+      </nav>
+      <p class="hint">AI 由你自带接口（BYO Key）。第一次玩请先进「AI 设置」填好接口地址与 Key。</p>
+    </section>
+
+    <!-- ============ 屏：单机开局（features.md §6） ============ -->
+    <section class="screen" id="screen-solo" hidden>
+      <h2>单机开局</h2>
+      <p class="hint">你是唯一真人，其余 8 个座位由 AI 扮演。对局在本机浏览器里运行（shared/game.js 同一内核），AI 请求经 Worker 中转。</p>
+      <label class="field"><span class="field-label">昵称</span>
+        <input id="solo-nick" maxlength="12" autocomplete="off" placeholder="怎么称呼你">
+      </label>
+      <!-- js/app.js startSolo()：本地 join → ready → start(solo) → 切 screen-game（两步确认） -->
+      <button class="btn btn-primary" id="solo-start" type="button">开始游戏</button>
+      <button class="btn btn-ghost" type="button" data-goto="screen-menu">返回</button>
+    </section>
+
+    <!-- ============ 屏：联机（建房 / 进房，features.md §7） ============ -->
+    <section class="screen" id="screen-online" hidden>
+      <h2>联机房间</h2>
+      <div class="card">
+        <h3>建房</h3>
+        <label class="field"><span class="field-label">昵称</span>
+          <input id="host-nick" maxlength="12" autocomplete="off" placeholder="房主昵称">
+        </label>
+        <!-- js/net.js：POST /api/room/new → 得 6 位房号 → 切 screen-lobby -->
+        <button class="btn btn-primary" id="host-create" type="button">创建房间</button>
+      </div>
+      <div class="card">
+        <h3>进房</h3>
+        <label class="field"><span class="field-label">房号</span>
+          <input id="join-code" maxlength="6" autocomplete="off" placeholder="6 位房号">
+        </label>
+        <label class="field"><span class="field-label">昵称</span>
+          <input id="join-nick" maxlength="12" autocomplete="off" placeholder="你的昵称">
+        </label>
+        <!-- js/net.js：POST /api/room/:code/join → 切 screen-lobby -->
+        <button class="btn btn-primary" id="join-enter" type="button">进入房间</button>
+      </div>
+      <!-- 刷新 / 重开后回到上次房间（localStorage 固定身份，features.md §2） -->
+      <button class="btn" id="join-resume" type="button" hidden>回到房间</button>
+      <button class="btn btn-ghost" type="button" data-goto="screen-menu">返回</button>
+    </section>
+
+    <!-- ============ 屏：房间大厅 / lobby（features.md §7.3–7.5） ============ -->
+    <section class="screen" id="screen-lobby" hidden>
+      <h2>房间大厅</h2>
+      <p class="hint" id="room-code-line" hidden>房号 <strong id="room-code"></strong>（发给朋友，进同一房；点我复制）</p>
+      <!-- 座位 1–9：昵称 / 房主标 / 准备态；空位显示「待加入」。渲染归 js/ui.js，数据归 js/net.js 轮询 -->
+      <ul class="seat-grid" id="lobby-seats" aria-label="座位列表">
+        <li class="seat seat-empty">1 · 待加入</li>
+        <li class="seat seat-empty">2 · 待加入</li>
+        <li class="seat seat-empty">3 · 待加入</li>
+        <li class="seat seat-empty">4 · 待加入</li>
+        <li class="seat seat-empty">5 · 待加入</li>
+        <li class="seat seat-empty">6 · 待加入</li>
+        <li class="seat seat-empty">7 · 待加入</li>
+        <li class="seat seat-empty">8 · 待加入</li>
+        <li class="seat seat-empty">9 · 待加入</li>
+      </ul>
+      <div class="row-actions">
+        <button class="btn" id="btn-ready" type="button">准备</button>
+        <!-- 房主可见；仅全员已准备时可用（空座位不受限制） -->
+        <button class="btn btn-primary" id="btn-start" type="button" disabled>开始游戏</button>
+      </div>
+      <!-- js/app.js：开始时若有空位，先确认「将补 N 个 AI 补足 9 人开局」再 act(start)（features.md §7.4，两步确认） -->
+    </section>
+
+    <!-- ============ 屏：对局主屏（features.md §4：夜晚 / 白天子阶段在此渲染） ============ -->
+    <section class="screen" id="screen-game" hidden>
+      <!-- 阶段条：夜里只显示「第 N 夜」，不显示子阶段与轮到谁（防泄漏，features.md §4.1.6） -->
+      <div class="phase-banner" id="phase-banner">第 1 夜</div>
+
+      <!-- 身份卡：我的角色 + 合法私有信息（狼队友 / 验史 / 药态 / 刀口），js/ui.js renderIdCard -->
+      <div class="idcard" id="idcard"></div>
+
+      <!-- 公开事件流：发言 / 遗言 / PK / 投票去向 / 死讯 / 翻牌与枪杀公告（渲染归 js/ui.js） -->
+      <ul class="log" id="log" aria-live="polite"></ul>
+
+      <!-- 座位网格（存活 / 死亡 / 托管 / 我）：渲染归 js/ui.js -->
+      <ul class="seat-grid seat-grid-game" id="game-seats" aria-label="对局座位"></ul>
+
+      <!-- 行动面板：按阶段轮换——狼定刀 / 预言家验人 / 女巫用药 / 猎人开枪 / 白天发言 / 投票 / PK。
+           不可逆操作一律「选择 → 底部确认条 → 提交」（两步确认，features.md §1） -->
+      <div class="action-panel" id="action-panel"></div>
+
+      <!-- 离开对局：单机 = 放弃本局（清 localStorage 进度）；联机 = 退出观看（房间仍在，可从联机页回房） -->
+      <button class="btn btn-ghost btn-leave" id="btn-leave-game" type="button">离开对局</button>
+    </section>
+
+    <!-- ============ 屏：终局复盘 revealed（features.md §6.5 / §7.9） ============ -->
+    <section class="screen" id="screen-revealed" hidden>
+      <h2 id="result-title">终局</h2>
+      <!-- 全员身份 / 胜负 / 死因复盘表（终局唯一翻牌时机），js/ui.js renderRevealed -->
+      <ul class="reveal-list" id="reveal-list"></ul>
+      <button class="btn" id="btn-back-menu" type="button" data-goto="screen-menu">返回主菜单</button>
+    </section>
+
+    <!-- ============ 屏：AI 设置 BYO（features.md §8.2） ============ -->
+    <section class="screen" id="screen-settings" hidden>
+      <h2>AI 设置（自带 Key）</h2>
+      <label class="field"><span class="field-label">接口地址（OpenAI 兼容）</span>
+        <input id="cfg-baseurl" autocomplete="off" placeholder="https://api.openai.com/v1">
+      </label>
+      <label class="field"><span class="field-label">API Key</span>
+        <input id="cfg-key" type="password" autocomplete="off" placeholder="只存本机浏览器">
+      </label>
+      <label class="field"><span class="field-label">模型名</span>
+        <input id="cfg-model" autocomplete="off" placeholder="gpt-4o-mini">
+      </label>
+      <!-- js/ai.js：存 localStorage（uid / 昵称同处）；请求一律经 Worker /api/ai-proxy 转发 -->
+      <button class="btn btn-primary" id="cfg-save" type="button">保存</button>
+      <p class="hint">Key 只存浏览器 localStorage、按请求透传，服务端不落盘。同 IP 每日中转上限 5000 次。</p>
+      <button class="btn btn-ghost" type="button" data-goto="screen-menu">返回</button>
+    </section>
+
+  </main>
+
+  <!-- 全局底部固定确认条（两步确认的第二步）：不可逆操作（定刀 / 用药 / 开枪 / 投票 / PK / 开始）专用
+       js/ui.js showConfirm(text, onSubmit) / hideConfirm()；热区 ≥44px；无 from-opacity 入场动画 -->
+  <footer class="confirm-bar" id="confirm-bar" hidden>
+    <span class="confirm-selection" id="confirm-selection">未选择</span>
+    <button class="btn btn-danger" id="confirm-submit" type="button">确认</button>
+  </footer>
+
+  <noscript>
+    <p class="noscript-note">狼人杀需要开启 JavaScript 才能开局。请在浏览器设置中允许 JavaScript，然后刷新页面。</p>
+  </noscript>
+
+  <!-- ============ 模块加载（依赖序在前，入口最后；模块间用 ESM import，此处按序列出便于核对） ============
+       依赖方向：app → ui / net / ai / prompts；ui → icons；ai → prompts / net / shared/game.js；
+       shared/game.js 由前端与 Worker 共用（js/app.js 单机模式 import，此处不重复列出）。
+       改任何 js/css 后 sw.js CACHE +1（CLAUDE.md 硬规则）。 -->
+  <script type="module" src="js/prompts.js"></script>
+  <script type="module" src="js/net.js"></script>
+  <script type="module" src="js/ai.js"></script>
+  <script type="module" src="js/icons.js"></script>
+  <script type="module" src="js/ui.js"></script>
+  <script type="module" src="js/app.js"></script>
+
+  <!-- Service Worker 注册（PWA 离线壳，策略见 sw.js 文件头） -->
+  <script type="module">
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("sw.js").catch(function () { /* 注册失败不阻塞游戏 */ });
+    }
+  </script>
+</body>
+</html>

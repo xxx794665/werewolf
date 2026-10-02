@@ -1,0 +1,344 @@
+/* ============================================================
+ * style.css —— 唯一样式表
+ * ------------------------------------------------------------
+ * 移动端优先，硬指标（docs/features.md §1，验收级）：
+ *   - pointer:coarse 触控热区 ≥ 44px（.btn / input / .seat / .target-btn 直接保底 44px）
+ *   - 单列布局，大屏正文限宽 ~640px（main 与 .confirm-bar 同限宽）
+ *   - 最小字号 ≥ 12px（.badge / .hint 最小 12px）
+ *   - 弹窗 / 确认条 / toast 禁止 from-opacity 入场动画（中间态透明拦截点击）：
+ *     toast 只用 transform 位移，确认条直接显隐
+ *   - flex 防压瘪（长文本容器 min-width: 0）
+ *   - 全站零 emoji（图标一律 SVG：js/icons.js 的 .icon / assets/icons/）
+ * 改本文件后 sw.js CACHE +1（CLAUDE.md 硬规则）。
+ * ============================================================ */
+
+:root {
+  --bg: #15181d;        /* 夜色底 */
+  --panel: #1d222a;     /* 卡片底 */
+  --line: #2c333d;      /* 分隔线 */
+  --text: #e8e6e1;
+  --muted: #9aa3ad;
+  --accent: #d9a441;    /* 月色金 */
+  --danger: #c0453f;
+  --ok: #4f8a5b;
+  --min-tap: 44px;      /* 触控热区最小值 */
+  --content-max: 640px; /* 大屏正文限宽 */
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font: 16px/1.65 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* 正文容器：单列 + 限宽；底部预留确认条高度，防遮挡 */
+main {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 12px 14px calc(var(--min-tap) + 84px);
+}
+
+/* ---------- 顶栏：吸顶 + 滚动收拢（加 .is-collapsed 归 js/ui.js） ---------- */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  padding: 10px 14px;
+  /* PWA standalone + viewport-fit=cover 时页顶伸进刘海 / 状态栏区：
+   * 顶栏补 safe-area-inset-top，标题与副标不被遮挡（底部 confirm-bar / toast 已适配底侧） */
+  padding-top: calc(10px + env(safe-area-inset-top, 0px));
+  transition: padding 0.15s linear; /* 只动 padding，不动 opacity（禁 from-opacity 入场） */
+}
+/* 收拢态同样保留安全区上内边距（padding-block 会重置顶侧，需在其后覆盖） */
+.topbar.is-collapsed { padding-block: 3px; padding-top: calc(3px + env(safe-area-inset-top, 0px)); }
+.topbar-title { margin: 0; font-size: 18px; line-height: 1.3; flex-shrink: 0; }
+.topbar-sub { font-size: 13px; color: var(--muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- 屏幕切换（js/app.js 切屏状态机） ---------- */
+.screen { display: block; }
+.screen[hidden] { display: none; }
+
+.title { margin: 10px 0 4px; font-size: 26px; }
+.subtitle { margin: 0 0 16px; color: var(--muted); font-size: 14px; }
+h2 { margin: 10px 0 12px; font-size: 20px; }
+h3 { margin: 0 0 8px; font-size: 16px; }
+.hint { color: var(--muted); font-size: 13px; } /* ≥12px 下限 */
+
+/* ---------- 卡片与表单（flex 防压瘪：子项 min-width: 0） ---------- */
+.card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  margin: 0 0 12px;
+}
+.field { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; min-width: 0; }
+.field-label { font-size: 13px; color: var(--muted); }
+input {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-height: var(--min-tap);
+  min-width: 0;
+}
+
+/* ---------- 按钮 / 菜单：热区 ≥44px ---------- */
+.menu { display: flex; flex-direction: column; gap: 10px; margin: 0 0 16px; }
+.row-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.btn {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-height: var(--min-tap);
+  min-width: 0;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #1c1607; font-weight: 600; }
+.btn-danger { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
+.btn-ghost { background: transparent; }
+.btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+/* 触控设备兜底：所有可交互元素热区 ≥44px */
+@media (pointer: coarse) {
+  .btn, input, .seat { min-height: var(--min-tap); }
+}
+
+/* ---------- 阶段条 / 事件流 ---------- */
+.phase-banner {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+.log {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.log li {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+  overflow-wrap: anywhere; /* 长文本不撑破单列 */
+}
+
+/* ---------- 座位网格：小屏 2 列，≥480px 3 列 ---------- */
+.seat-grid {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+@media (min-width: 480px) { .seat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.seat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
+.seat-empty { color: var(--muted); }
+
+/* ---------- 行动面板 ---------- */
+.action-panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+  margin: 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* ---------- 底部固定确认条（两步确认第二步）：热区 ≥44px，safe-area 适配 ---------- */
+.confirm-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 10px 14px calc(10px + env(safe-area-inset-bottom, 0px));
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.confirm-bar[hidden] { display: none; }
+.confirm-selection { flex: 1; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.confirm-bar .btn { flex-shrink: 0; }
+
+/* ---------- 弹窗约定：入场禁止 from-opacity 动画 ----------
+ * 中间态半透明会「透明拦截」点击（features.md §1）。本项目不使用模态弹窗：
+ * 确认走底部 .confirm-bar（直接显隐），提示走 .toast（仅 transform 位移）。 */
+
+/* ---------- SVG 图标（js/icons.js；颜色字号随上下文） ---------- */
+.icon { width: 1.15em; height: 1.15em; flex-shrink: 0; vertical-align: -0.2em; }
+.icon-wrap { display: inline-flex; flex-shrink: 0; }
+
+/* ---------- 徽章（座位 / 身份小标，字号下限 12px） ---------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.badge-owner { color: var(--accent); border-color: var(--accent); }
+.badge-me { color: var(--accent); border-color: var(--accent); }
+.badge-ok { color: var(--ok); border-color: var(--ok); }
+.badge-warn { color: var(--danger); border-color: var(--danger); }
+.badge-role { color: var(--text); }
+
+/* ---------- 座位（大厅与对局共用网格；flex 防压瘪） ---------- */
+.seat-no { font-weight: 700; color: var(--accent); flex-shrink: 0; }
+.seat-nick { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.seat-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.seat-me { border-color: var(--accent); }
+.seat-dead { opacity: 0.55; }
+.seat-dead .seat-nick { text-decoration: line-through; }
+
+/* ---------- 阶段条（icon + 文案 + 子阶段） ---------- */
+.phase-banner { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.phase-sub { margin-left: auto; font-size: 13px; color: var(--muted); font-weight: 400; flex-shrink: 0; }
+
+/* ---------- 身份卡（我的角色 + 合法私有信息） ---------- */
+.idcard {
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin: 0 0 12px;
+  min-width: 0;
+}
+.idcard:empty { display: none; }
+.idcard-head { display: flex; align-items: center; gap: 8px; font-size: 16px; min-width: 0; }
+.idcard-line { margin: 6px 0 0; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+
+/* ---------- 事件流条目分色 ---------- */
+.ev-deaths { border-left: 3px solid var(--danger); }
+.ev-lastwords { border-left: 3px solid var(--accent); }
+.ev-pk { border-left: 3px solid var(--accent); }
+.ev-hunter { border-left: 3px solid var(--danger); }
+.ev-vote, .ev-sys { color: var(--muted); font-size: 13px; }
+
+/* ---------- 行动面板：目标选择网格（热区 ≥44px） ---------- */
+.action-title { margin: 0; font-size: 15px; font-weight: 600; }
+.target-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+@media (min-width: 480px) { .target-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.target-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: var(--min-tap);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.target-btn.is-selected { border-color: var(--accent); background: #2a2415; }
+.speech-input {
+  /* 字号必须 ≥16px（继承 body 的 16px）：iOS Safari 聚焦 <16px 输入框会自动放大
+   * 页面且提交后不还原——发言 / 遗言 / PK 自辩是白天必经路径，不许触发缩放 */
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+  width: 100%;
+  resize: vertical;
+}
+.counter { margin: 0; text-align: right; }
+
+/* ---------- toast：仅 transform 位移入场，禁止 from-opacity（§1） ---------- */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--min-tap) + 30px + env(safe-area-inset-bottom, 0px));
+  z-index: 30;
+  max-width: min(90vw, var(--content-max));
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 14px;
+  transform: translate(-50%, 200%);
+  transition: transform 0.15s linear; /* 只动 transform */
+  pointer-events: none;
+}
+.toast.is-show { transform: translate(-50%, 0); }
+
+/* ---------- 房号行（可点复制）：可点击元素，触控热区保底 44px（§1 硬指标） ---------- */
+#room-code-line {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-height: var(--min-tap);
+  margin-block: 4px;
+}
+#room-code { letter-spacing: 2px; color: var(--accent); }
+
+/* ---------- 终局复盘 ---------- */
+.reveal-list { list-style: none; margin: 0 0 16px; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.reveal-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.reveal-reason { border-left: 3px solid var(--accent); font-weight: 600; }
+
+/* ---------- 其它 ---------- */
+.btn-leave { width: 100%; }
+.noscript-note { padding: 20px 14px; color: var(--muted); }
