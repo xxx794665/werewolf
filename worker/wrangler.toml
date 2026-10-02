@@ -8,7 +8,7 @@
 
 name = "werewolf-room"
 main = "src/index.js"
-compatibility_date = "2026-10-03"
+compatibility_date = "2026-10-02" # Cloudflare 按 UTC 校验「不可为未来日期」；本地 UTC+8 的 10-03 清晨在 UTC 仍是 10-02
 
 # Durable Object：一个房间 = 一个 DO 实例（游戏状态机与唯一权威，ADR-0001）
 [[durable_objects.bindings]]
