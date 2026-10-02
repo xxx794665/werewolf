@@ -31,7 +31,7 @@ const CATCHUP_MS = 300;
 /* ---------- Worker 基址 ----------
  * 部署后默认 workers.dev；本机开发（localhost 打开页面）默认打本地 wrangler dev。
  * 可用 localStorage.ww_api_base 覆盖（部署到自定义域 / 反代时）。 */
-const DEFAULT_BASE = "https://werewolf-room.xxx794665.workers.dev";
+const DEFAULT_BASE = "https://werewolf-room.249939260.workers.dev";
 
 /* localStorage 兜底：node 测试环境没有，用内存 Map 顶替（仅保证可 import） */
 const mem = new Map();

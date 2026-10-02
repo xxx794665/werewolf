@@ -80,9 +80,11 @@ npx wrangler deploy
 2. GitHub 仓库 → **Settings → Pages → Branch 选 `main`（根目录）→ Save**。gh CLI 不可用，这一步需在网页上手动操作一次（一次性）。
 3. 发布地址：`https://xxx794665.github.io/werewolf/`。
 
-### 部署状态（2026-10-03 核实）
+### 部署状态（2026-10-03 部署后核实）
 
-代码完成、测试全绿，但**尚未执行首次部署**：Worker `werewolf-room` 未创建（wrangler 查询返回 10007）、Pages 返回 404、仓库还没有首条提交。首次部署按上面两节执行即可。
+- Worker 已部署：`https://werewolf-room.249939260.workers.dev`（版本 `1e580b68`；首次部署因 compatibility_date 触发 UTC 校验报 10021，已改为 2026-10-02 重部署成功）。健康检查经外部通道实测返回 `{"ok":true}`；本机直连 workers.dev 因 DNS 污染不可达（见已知限制）。
+- 仓库已推送：6 个提交至 `origin/main`。
+- Pages 待开启：仓库 **Settings → Pages → Branch 选 `main`（根目录）→ Save**（gh CLI 未装，需网页手动一次），生效地址 `https://xxx794665.github.io/werewolf/`。
 
 ## 本地开发与自检
 
@@ -94,7 +96,7 @@ node tools/smoke-fullgame.mjs # 整局冒烟（建房开桌到终局，上游桩
 
 ## 已知限制
 
-- **workers.dev 域名 DNS 污染风险**：后端默认地址 `werewolf-room.xxx794665.workers.dev` 在部分地区可能被 DNS 污染不可达（母本 situation_puzzle 同款经验）。第一版先照用，不做自定义域反代（`docs/features.md` 非目标 #12）；受影响的用户可换网络环境，或部署后自配反代并经 `localStorage.ww_api_base` 覆盖接口地址。
+- **workers.dev 域名 DNS 污染风险**：后端默认地址 `werewolf-room.249939260.workers.dev` 在部分地区可能被 DNS 污染不可达（母本 situation_puzzle 同款经验，本机已实际命中）。第一版先照用，不做自定义域反代（`docs/features.md` 非目标 #12）；受影响的用户可换网络环境，或部署后自配反代并经 `localStorage.ww_api_base` 覆盖接口地址。
 - **轮询延迟**：HTTP 短轮询（非 WebSocket），普通节奏 1.5s 一拍，无变化退避至 4s，页面回前台有追赶；狼人杀回合制下体感可接受，但动作送达有秒级延迟（ADR-0001，升级 WebSocket 属后续）。
 - **未覆盖真机实测**：截至 2026-10-03 未做真机与多端实测。移动端硬指标（热区 ≥44px、单列限宽、最小字号等）已按 `docs/features.md` §1 落实并写了前端测试，但多档视口 × 全屏走查（360/390/844×390/834/1024/1366）只覆盖桌面浏览器，首次部署后需真机过一遍。
 - **限流配额为 isolate 内存计数**：AI 中转同 IP 每日 5000 次、建房同 IP 每日 100 房，Worker 重新部署 / 休眠唤醒后清零；重度玩家一天内配额可能耗尽（单局约 60–100 次 AI 调用）。
