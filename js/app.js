@@ -152,6 +152,7 @@ async function startSolo(nick) {
   mode = "solo";
   solo = { state: r.state, log: [], driving: false };
   saveSolo();
+  ui.resetTags("solo"); // 玩家标签是本局笔记：新局清零（刷新恢复同局不受影响）
   enterGame();
   soloDrive();
 }

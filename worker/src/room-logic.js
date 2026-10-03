@@ -20,7 +20,7 @@
  * ============================================================ */
 
 import * as game from '../../shared/game.js';
-import { buildMessages, clampMaxTokens } from '../../shared/prompts.js';
+import { buildMessages, clampMaxTokens, clipSpeech } from '../../shared/prompts.js';
 
 export const ACTION_TIMEOUT_MS = 150_000; // §5.11 行动超时（DO alarm）
 export const HOST_AFTER_MS = 60_000; // §7.7 无心跳转托管
@@ -554,7 +554,7 @@ function cleanChat(line) {
  *  狼阶段不走此函数（两行格式，见 parseWolfReply）。 */export function parseAIReply(phase, text) {
   if (typeof text !== 'string') return null;
   if (phase === 'speak' || phase === 'lastwords' || phase === 'pk_speak') {
-    const t = text.trim().slice(0, 200); // >200 截断（§5.8 硬上限）
+    const t = clipSpeech(text.trim(), game.SPEECH_MAX); // 硬上限 250 字、按句收尾（§5.8 / ADR-0012）
     return t ? { type: 'speak', text: t } : null;
   }
   const s = text.trim().toLowerCase().replace(/[\s.,;:!?，。；：！？、"'`()[\]{}<>《》-]/g, '');

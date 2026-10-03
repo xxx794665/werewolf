@@ -8,6 +8,7 @@
  *   4. 单机本地引擎整局：join → ready → start(solo) → 全部座位走 §8.4
  *      确定性回退推进，直到 revealed（验证 shared/game.js 的 solo 开关与
  *      app.js soloDrive 同款的驱动循环收敛）
+ *   5. ui.js 玩家标签：scope 生命周期（换局清零 / 刷新复原）+ 校验上限
  * 运行：node --test test/frontend.test.mjs
  * ============================================================ */
 
@@ -62,10 +63,10 @@ test("全站零 emoji（features.md §1）：js/ + index.html + style.css", () =
 
 /* ---------- 3. ai.js 数据件（docs/ai-prompts.md §5.1 / §5.4） ---------- */
 
-test("parseReply：发言类截断 200 字，空文本失败", () => {
+test("parseReply：发言类截断 250 字，空文本失败", () => {
   assert.deepEqual(ai.parseReply("speak", "  我觉得 3 号可疑。 "), { type: "speak", text: "我觉得 3 号可疑。" });
   const long = ai.parseReply("speak", "长".repeat(300));
-  assert.equal(long.text.length, 200); // §5.8 硬上限
+  assert.equal(long.text.length, 250); // §5.8 硬上限（ADR-0012）
   assert.equal(ai.parseReply("speak", "   "), null);
 });
 
@@ -191,4 +192,58 @@ test("单机身份卡：roleCardOf 按角色白名单出私有字段", () => {
       assert.equal(card.wolves, undefined, "平民 / 猎人不得带狼队信息");
     }
   }
+});
+
+/* ---------- 5. 玩家标签（私人笔记：scope 生命周期 + 校验 + localStorage 持久化） ---------- */
+
+/** 内存 localStorage 顶替（node 无 webstorage；ui.js 调用时才读 global） */
+function shimLocalStorage() {
+  const mem = new Map();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+      setItem: (k, v) => mem.set(k, String(v)),
+      removeItem: (k) => mem.delete(k),
+    },
+  });
+  return mem;
+}
+
+test("玩家标签：增删开关 / 校验上限 / scope 切换清零与刷新恢复", async () => {
+  const mem = shimLocalStorage();
+  const ui = await import("../js/ui.js");
+
+  ui.resetTags("solo");
+  assert.deepEqual(ui.seatTags(3), []);
+
+  /* 校验：空 / 超长 / 重复 */
+  assert.match(ui.addSeatTag(3, "   "), /不能为空/);
+  assert.match(ui.addSeatTag(3, "123456789"), /最多 8 字/);
+  assert.equal(ui.addSeatTag(3, "狼"), null);
+  assert.match(ui.addSeatTag(3, "狼"), /已有/);
+  assert.equal(ui.addSeatTag(3, "查杀"), null);
+  assert.deepEqual(ui.seatTags(3), ["狼", "查杀"]);
+
+  /* toggle：已有 → 移除；满 6 个后拒绝新增 */
+  assert.equal(ui.toggleSeatTag(3, "狼"), true);
+  assert.deepEqual(ui.seatTags(3), ["查杀"]);
+  for (const t of ["好人", "金水", "女巫", "猎人", "预言家"]) assert.equal(ui.addSeatTag(3, t), null);
+  assert.match(ui.addSeatTag(3, "第七个"), /最多 6 个/);
+  assert.equal(ui.toggleSeatTag(3, "好人"), true);
+  assert.deepEqual(ui.seatTags(3), ["查杀", "金水", "女巫", "猎人", "预言家"]);
+
+  /* 生命周期：切走 scope = 新对局（清零），切回 = 刷新复原（localStorage） */
+  assert.equal(ui.addSeatTag(2, "好人"), null);
+  ui.enterTagScope("ROOM2");
+  assert.deepEqual(ui.seatTags(2), []);
+  assert.deepEqual(ui.seatTags(3), []);
+  ui.enterTagScope("solo");
+  assert.deepEqual(ui.seatTags(2), ["好人"]);
+  assert.deepEqual(ui.seatTags(3), ["查杀", "金水", "女巫", "猎人", "预言家"]);
+
+  /* 坏数据兜底：解析失败当无标签，不抛错 */
+  mem.set("ww_tags_BADJSON", "{bad json");
+  ui.enterTagScope("BADJSON");
+  assert.deepEqual(ui.seatTags(1), []);
 });

@@ -260,7 +260,7 @@ export class Room {
     const out = await proxyFetch(url, headers, JSON.stringify({ ...reqBody, max_tokens: budget }), timeoutMs);
     if (out.error) return { content: null, starved: false };
     const { content, finish } = extractContent(out.text);
-    if (content.trim()) return { content, starved: false }; // 截断但有正文也用（解析端按 200 字硬上限截断）
+    if (content.trim()) return { content, starved: false }; // 截断但有正文也用（解析端按 250 字上限按句截断）
     return {
       content: null,
       starved: finish === 'length' || (out.status >= 500 && out.text.indexOf('empty response content') >= 0),

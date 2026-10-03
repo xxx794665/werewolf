@@ -40,6 +40,7 @@
 | 单机模式 | 1 真人 + 8 AI，在玩家浏览器本地跑 shared/game.js 同一内核（不建 Worker 房间；ADR-0003：内核 start 的真人 ≥3 限制使私密房间路径不可行）；AI 请求经 /api/ai-proxy，状态存 localStorage 可断点续玩 |
 | solo 开关 | start 动作的 `solo:true` 字段：内核据此把最小开桌真人从 3 放宽到 1（shared/game.js hStart）。仅本地单机路径使用——DO 路由（worker/src/room-logic.js 的 start）不下发该字段，联机行为不变（ADR-0003） |
 | ww_solo | 单机对局的 localStorage 键：整份内核状态 + 公开事件账本（js/app.js 读写），刷新后恢复对局并由 soloDrive 补上欠下的 AI 行动；离开对局（两步确认）时清除 |
+| 玩家标签 | 座位行内的私人笔记（预置 好人/狼/查杀等 + 自定义，js/ui.js）：只存标注者本机 localStorage（`ww_tags_<scope>`，scope = 联机房号 / 单机 `solo`），生命周期 = 所属对局（开新局清零、同局刷新保留）；不进快照、不上传、不影响判定 |
 | 联机模式 | 房间制：建房 → 房号 → 进房 → 准备 → 房主开始 |
 | 房号 | 6 位房间代码，字符集 `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`（去易混 I/O/0/1） |
 | 房主 | 建房者，唯一能点开始、唯一驱动联机 AI 的人（快照 `owner` 字段标识） |

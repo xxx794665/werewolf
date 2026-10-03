@@ -37,7 +37,7 @@
 export const SEAT_COUNT = 9; // §3：房间人数固定 9，不可设置
 export const MIN_HUMANS = 3; // §7.4：最小开桌真人 3 人
 export const BOARD = { werewolf: 3, villager: 3, seer: 1, witch: 1, hunter: 1 }; // §3 唯一板子
-const SPEECH_MAX = 200; // §5.8：发言 / 遗言 ≤200 字（内核同 UI 双重限制）
+export const SPEECH_MAX = 250; // §5.8：发言 / 遗言硬上限 250 字（提示词目标 100–200，内核 / UI / 解析截断三处同口径；ADR-0012）
 export const WOLF_CHAT_MAX = 60; // §4.1.1：狼队密聊每条 ≤60 字
 export const WOLF_CHAT_TURNS = 5; // §4.1.1：每晚每狼至多 5 条（防刷屏防状态膨胀）
 

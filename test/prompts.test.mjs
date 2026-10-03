@@ -8,8 +8,9 @@ import assert from "node:assert/strict";
 import {
   buildMessages, PHASES, ROLE_PROMPTS, TASK_PROMPTS,
   COMMON_CONSTRAINTS, BOARD_RULES, PERSONAS,
-  clampMaxTokens, extractContent
+  clampMaxTokens, extractContent, clipSpeech, AI_ATTEMPT_TIMEOUTS_MS, AI_STEP_BUDGET_MS
 } from "../shared/prompts.js";
+import { SPEECH_MAX } from "../shared/game.js";
 
 /* 造一份小型公开历史：夜 1 死 4/7（首夜遗言）→ 白天发言 → 投票 → 放逐 5；
  * 夜 2 狼刀 2 号（猎人）翻枪带走 8 号 → 第 2 天发言。
@@ -289,4 +290,27 @@ test("extractContent：普通 JSON 与 cline { data: { choices } } 信封", () =
   assert.equal(w.finish, "length");
   assert.equal(extractContent('{"error":"empty response content"}').content, "");
   assert.equal(extractContent("not json at all").content, "");
+});
+
+/* ---------- 发言硬上限 250 与按句截断（2026-10-03 试玩反馈，ADR-0012） ---------- */
+
+test("clipSpeech：超限退到句末标点收尾；句点太靠前硬切；限内原样返回", () => {
+  assert.equal(clipSpeech("短发言。", 250), "短发言。", "限内不动");
+  const a = "啊".repeat(245) + "。" + "哈".repeat(30); // head(250) 内句点在第 246 字 → 按句收
+  const c1 = clipSpeech(a, 250);
+  assert.equal(c1, "啊".repeat(245) + "。", "截点应落在句末标点上");
+  // 句点太靠前（< 上限 60%）→ 硬切
+  const b = "短。" + "长".repeat(300);
+  assert.equal(clipSpeech(b, 250).length, 250, "无可用句点 → 退回硬切");
+  // 句末标点恰好在上限 60%（150 字）→ 按句收
+  const mid = "啊".repeat(150) + "。" + "嗯".repeat(200);
+  const c3 = clipSpeech(mid, 250);
+  assert.equal(c3, "啊".repeat(150) + "。", "退到最后一个句末标点");
+  assert.equal(clipSpeech(null, 250), null, "非字符串原样返回");
+});
+
+test("时间预算常量：两次尝试 45s+25s=70s < 一轮 150s 的一半（ADR-0011）", () => {
+  assert.deepEqual(AI_ATTEMPT_TIMEOUTS_MS, [45_000, 25_000]);
+  assert.equal(AI_STEP_BUDGET_MS, 75_000);
+  assert.equal(SPEECH_MAX, 250);
 });

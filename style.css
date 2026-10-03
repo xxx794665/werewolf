@@ -241,6 +241,37 @@ input {
 .seat-dead { opacity: 0.55; }
 .seat-dead .seat-nick { text-decoration: line-through; }
 
+/* ---------- 玩家标签（座位行内私人笔记，只存本机） ----------
+ * li.seat flex-wrap 让标签行 / 编辑器独占整行（flex-basis:100%）。 */
+.seat { flex-wrap: wrap; }
+.seat-tags-open { border-color: var(--accent); }
+.badge-tag { color: var(--accent); border-color: var(--accent); border-style: dashed; }
+.btn-tag { padding: 4px 10px; font-size: 13px; line-height: 1; flex-shrink: 0; }
+.tag-editor {
+  flex-basis: 100%;
+  min-width: 0; /* 输入框固有宽会把 flex 子项 min-content 顶破座位格，允许收缩 */
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.tag-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-chip {
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  min-height: var(--min-tap);
+  padding: 4px 14px;
+  cursor: pointer;
+}
+.tag-chip.is-on { color: var(--accent); border-color: var(--accent); }
+.tag-add-row { display: flex; gap: 8px; }
+.tag-add-row input { flex: 1; }
+
 /* ---------- 阶段条（icon + 文案 + 子阶段 + 轮到谁 + 倒计时） ----------
  * 吸顶在顶栏正下方随页面滚动（--topbar-h 由 js/ui.js initTopbar 实测写入），
  * 像常驻 toast：对局进行中任何时候抬头可见阶段 / 行动方 / 剩余时间 */

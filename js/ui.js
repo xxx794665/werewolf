@@ -10,6 +10,8 @@
  *     「选择 → 底部固定确认条（热区 ≥44px）→ 提交」（features.md §1）。
  *   - toast：只定位移动画，禁止 from-opacity 入场（透明拦截点击，§1）。
  *   - 顶栏滚动收拢：滚动 >60px 给 #topbar 加 .is-collapsed。
+ *   - 玩家标签：座位行内私人笔记（预置 + 自定义，只存 localStorage，
+ *     生命周期 = 所属对局），renderSeats 内联编辑器 + 快照重渲染保展开态。
  * 安全：玩家昵称与 AI 发言是不可信文本，一律 textContent，绝不 innerHTML；
  *   innerHTML 只用于本仓库 icons.js 的 SVG 常量。
  * node --test 可 import（顶层不碰 document）。
@@ -297,6 +299,7 @@ function logItem(snap, ev) {
 }
 
 function renderSeats(snap) {
+  enterTagScope(snap.solo ? "solo" : String(snap.code || ""));
   const grid = $("game-seats");
   grid.textContent = "";
   for (const p of snap.players) {
@@ -306,14 +309,145 @@ function renderSeats(snap) {
     if (p.seat === snap.mySeat) li.classList.add("seat-me");
     li.append(el("span", "seat-no", `${p.seat}`), el("span", "seat-nick", p.nick));
     const badges = el("span", "seat-badges");
+    for (const t of seatTags(p.seat)) badges.append(badge("badge-tag", null, t)); // 私人标签置前
     if (p.role && ROLE_NAME[p.role]) badges.append(badge("badge-role", ROLE_ICON[p.role], ROLE_NAME[p.role]));
     if (p.isAI) badges.append(badge("badge-muted", "robot", "AI"));
     if (p.hosted) badges.append(badge("badge-warn", "robot", "托管"));
     if (p.seat === snap.mySeat) badges.append(badge("badge-me", null, "我"));
     if (!p.alive) badges.append(badge("badge-muted", "skull", "出局"));
     li.append(badges);
+    /* 私人标签编辑：点「＋」展开内联编辑器（模块状态保住展开态，1.5s 重渲染不收起） */
+    const tagBtn = el("button", "btn btn-tag", "+");
+    tagBtn.type = "button";
+    tagBtn.setAttribute("aria-label", `${p.seat} 号私人标签`);
+    tagBtn.setAttribute("aria-expanded", String(p.seat === openTagSeat));
+    tagBtn.addEventListener("click", () => {
+      openTagSeat = openTagSeat === p.seat ? null : p.seat;
+      renderSeats(snap);
+    });
+    li.append(tagBtn);
+    if (p.seat === openTagSeat) {
+      li.classList.add("seat-tags-open");
+      const editor = el("div", "tag-editor");
+      const chips = el("div", "tag-chip-row");
+      const current = seatTags(p.seat);
+      for (const t of [...TAG_PRESETS, ...current.filter((c) => !TAG_PRESETS.includes(c))]) {
+        const chip = el("button", "tag-chip" + (current.includes(t) ? " is-on" : ""), t);
+        chip.type = "button";
+        chip.setAttribute("aria-pressed", String(current.includes(t)));
+        chip.addEventListener("click", () => {
+          if (!toggleSeatTag(p.seat, t)) toast(`最多 ${TAG_MAX} 个标签`);
+          renderSeats(snap);
+        });
+        chips.append(chip);
+      }
+      const row = el("div", "tag-add-row");
+      const input = el("input", "tag-add-input");
+      input.maxLength = TAG_LEN_MAX;
+      input.placeholder = `自定义标签（≤${TAG_LEN_MAX} 字）`;
+      const add = el("button", "btn", "添加");
+      add.type = "button";
+      const doAdd = () => {
+        const err = addSeatTag(p.seat, input.value);
+        if (err) return toast(err);
+        renderSeats(snap);
+      };
+      add.addEventListener("click", doAdd);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") doAdd();
+      });
+      row.append(input, add);
+      editor.append(chips, row);
+      li.append(editor);
+    }
     grid.append(li);
   }
+}
+
+/* ---------- 玩家标签（私人笔记：座位行内快速标注，只存本机 localStorage） ----------
+ * 生命周期 = 所属对局：联机按房号一把 key（旧房 key 不清理，单个几十字节，
+ * ponytail: 量大时可加启动清理只留最近 N 把）；单机恒 "solo" 一把，开局重置。
+ * 纯前端笔记，不进快照、不上传、不影响任何判定。 */
+
+const TAGS_KEY_PREFIX = "ww_tags_";
+const TAG_PRESETS = ["好人", "狼", "预言家", "女巫", "猎人", "查杀", "金水"];
+const TAG_MAX = 6; // 每座位标签数上限（座位行宽度有限）
+const TAG_LEN_MAX = 8; // 单标签字数上限
+
+let tagScope = null;
+let tagSeats = {}; // { [seat]: string[] }
+let openTagSeat = null; // 当前展开编辑器的座位（快照 1.5s 一轮全量重渲染，靠模块状态保住展开态）
+
+function tagsKey(scope) {
+  return TAGS_KEY_PREFIX + scope;
+}
+
+function readTagsStorage(scope) {
+  try {
+    if (typeof localStorage === "undefined") return null;
+    const d = JSON.parse(localStorage.getItem(tagsKey(scope)) || "null");
+    return d && d.seats && typeof d.seats === "object" ? d.seats : null;
+  } catch (e) {
+    return null; // 坏数据当无标签
+  }
+}
+
+/** 渲染入口：对局变了（房号 / 单机）就换 scope 重载；同一局刷新恢复原标签。 */
+export function enterTagScope(scope) {
+  if (scope === tagScope) return;
+  tagScope = scope;
+  openTagSeat = null;
+  tagSeats = scope ? readTagsStorage(scope) || {} : {};
+}
+
+/** 开新局清零（app.js startSolo 调用；联机换房号由 enterTagScope 自然切换）。 */
+export function resetTags(scope) {
+  tagScope = scope;
+  openTagSeat = null;
+  tagSeats = {};
+  try {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(tagsKey(scope));
+  } catch (e) { /* 存不下就丢（隐私模式） */ }
+}
+
+export function seatTags(seat) {
+  return (tagSeats[seat] || []).slice();
+}
+
+function persistTags() {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(tagsKey(tagScope), JSON.stringify({ seats: tagSeats }));
+    }
+  } catch (e) { /* 存不下就丢（隐私模式），当局内存里仍在 */ }
+}
+
+/** 点预置 / 已有标签 = 开关切换。满员返回 false 由调用方 toast。 */
+export function toggleSeatTag(seat, tag) {
+  const list = tagSeats[seat] || [];
+  const i = list.indexOf(tag);
+  if (i >= 0) list.splice(i, 1);
+  else {
+    if (list.length >= TAG_MAX) return false;
+    list.push(tag);
+  }
+  tagSeats[seat] = list;
+  persistTags();
+  return true;
+}
+
+/** 自定义标签：校验 → 入列。返回错误文案或 null。 */
+export function addSeatTag(seat, raw) {
+  const tag = String(raw || "").trim();
+  if (!tag) return "标签不能为空";
+  if (tag.length > TAG_LEN_MAX) return `标签最多 ${TAG_LEN_MAX} 字`;
+  const list = tagSeats[seat] || [];
+  if (list.includes(tag)) return "已有该标签";
+  if (list.length >= TAG_MAX) return `最多 ${TAG_MAX} 个标签`;
+  list.push(tag);
+  tagSeats[seat] = list;
+  persistTags();
+  return null;
 }
 
 /* ---------- 行动面板（两步确认：选择 → 底部确认条 → 提交） ---------- */
@@ -381,14 +515,14 @@ function renderAction(snap, actions) {
     case "lastwords":
     case "pk_speak": {
       const title = kind === "speak" ? "轮到你发言" : kind === "lastwords" ? "发表你的遗言" : "你在 PK 台上，做自辩发言";
-      panel.append(el("p", "action-title", `${title}（不超过 200 字）`));
+      panel.append(el("p", "action-title", `${title}（不超过 250 字）`)); // 与 shared/game.js SPEECH_MAX 同口径
       const ta = el("textarea", "speech-input");
-      ta.maxLength = 200;
+      ta.maxLength = 250;
       ta.rows = 4;
       ta.placeholder = "说点什么…";
-      const counter = el("p", "hint counter", "0 / 200");
+      const counter = el("p", "hint counter", "0 / 250");
       ta.addEventListener("input", () => {
-        counter.textContent = `${ta.value.length} / 200`;
+        counter.textContent = `${ta.value.length} / 250`;
       });
       const send = el("button", "btn btn-primary", "提交发言"); /* 发言不在不可逆清单（§1），单步提交 */
       send.type = "button";

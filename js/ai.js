@@ -22,7 +22,7 @@
 
 import * as game from "../shared/game.js";
 import { drawRoster } from "../shared/roster.js";
-import { buildMessages, extractContent, clampMaxTokens, AI_TOKEN_BUDGET, AI_ATTEMPT_TIMEOUTS_MS } from "./prompts.js";import { apiBase } from "./net.js";
+import { buildMessages, extractContent, clipSpeech, clampMaxTokens, AI_TOKEN_BUDGET, AI_ATTEMPT_TIMEOUTS_MS } from "./prompts.js";import { apiBase } from "./net.js";
 
 const REQ_TIMEOUTS_MS = AI_ATTEMPT_TIMEOUTS_MS; // [45s, 25s]：失败 / 格式不合格重试 1 次，合计 70s < 一轮 150s 的一半（§8.4）
 /* [0,1) 浮点随机源（shared/roster.js 本地兜底抽取用，与 net.js uid 同款 crypto） */
@@ -147,7 +147,7 @@ async function requestOnce(cfg, messages, budget, timeoutMs) {
       clearTimeout(t);
     }
     const { content, finish } = extractContent(raw);
-    if (content.trim()) return { content, starved: false }; // 截断但有正文也用（解析端按 200 字硬上限截断）
+    if (content.trim()) return { content, starved: false }; // 截断但有正文也用（解析端按 250 字上限按句截断）
     return {
       content: null,
       starved: finish === "length" || (res.status >= 500 && /empty response content/i.test(raw)),
@@ -163,7 +163,7 @@ async function requestOnce(cfg, messages, budget, timeoutMs) {
 export function parseReply(phase, text) {
   if (typeof text !== "string") return null;
   if (phase === "speak" || phase === "lastwords" || phase === "pk_speak") {
-    const t = text.trim().slice(0, 200); // 硬上限 200 字（§5.8），DO / 内核也会拒超长
+    const t = clipSpeech(text.trim(), game.SPEECH_MAX); // 硬上限 250 字，尽量按句收尾（ADR-0012），DO / 内核也会拒超长
     return t ? { type: "speak", text: t } : null;
   }
   const s = text.trim().toLowerCase().replace(/[\s.,;:!?，。；：！？、"'`()[\]{}<>《》-]/g, "");

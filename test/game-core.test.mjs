@@ -764,13 +764,13 @@ test('行动校验：越权 / 非法目标 / 错误阶段一律拒绝，失败�
   assert.equal(adv(sSeer, { type: 'speak', seat: 1, text: 'x' }).error, '当前不是可发言阶段');
   assert.equal(adv(sSeer, { type: 'vote', seat: 1, target: 2 }).error, '当前不是投票阶段');
   assert.equal(adv(sSeer, { type: 'hunter_shoot', seat: seatOf(s0, 'hunter'), target: 1 }).error, '当前不是猎人开枪阶段');
-  // 发言：未轮到 / 超过 200 字 / 空
+  // 发言：未轮到 / 超过硬上限 250 字 / 空
   const peace = playNight(s0, { blade: seatsOf(s0, 'villager')[0], witchMove: { move: 'save' } });
   assert.equal(peace.state.subPhase, 'speak');
   const head = peace.state.queue[0];
   const other = peace.state.queue[1];
   assert.equal(adv(peace.state, { type: 'speak', seat: other, text: '抢话' }).error, '还没轮到该座位发言');
-  assert.equal(adv(peace.state, { type: 'speak', seat: head, text: 'x'.repeat(201) }).error, '发言不得超过 200 字');
+  assert.equal(adv(peace.state, { type: 'speak', seat: head, text: 'x'.repeat(251) }).error, '发言不得超过 250 字');
   assert.equal(adv(peace.state, { type: 'speak', seat: head, text: '   ' }).error, '发言不能为空');
   const good = adv(peace.state, { type: 'speak', seat: head, text: '我是好人。' });
   assert.equal(good.error, null);
@@ -829,7 +829,7 @@ test('确定性回退：同状态同结果；狼刀随机存活、女巫跳过�
   assert.equal(lw.error, null, lw.error);
   assert.equal(lw.events[0].type, 'last_words');
   assert.equal(lw.state.subPhase, 'speak');
-  // 发言回退 = 固定兜底句（确定性、≤200 字）
+  // 发言回退 = 固定兜底句（确定性、≤250 字）
   const fs1 = game.applyFallback(lw.state, lw.state.queue[0]);
   const fs2 = game.applyFallback(lw.state, lw.state.queue[0]);
   assert.equal(fs1.error, null, fs1.error);
@@ -891,7 +891,7 @@ test('遗言回退按身份交代基础信息：民报民+怀疑、女巫报药�
   assert.equal(fv.error, null, fv.error);
   assert.equal(fv.events[0].type, 'last_words');
   assert.ok(fv.events[0].text.includes('我是平民'), `遗言应报身份：${fv.events[0].text}`);
-  assert.ok(fv.events[0].text.length <= 200, '遗言 ≤200 字');
+  assert.ok(fv.events[0].text.length <= 250, '遗言 ≤250 字');
   // 女巫首夜死（放弃自救）→ 遗言报女巫 + 药剂状态
   const w0 = wolfVoteAll(s0, seatOf(s0, 'witch'));
   const w1 = adv(w0.state, { type: 'seer_check', seat: seatOf(s0, 'seer'), target: seatsOf(s0, 'villager')[1] });

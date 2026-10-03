@@ -152,7 +152,7 @@ buildMessages(history, roleCard, phase) →
 
 | phase | 期望输出 | 解析（见 §5.1） |
 |---|---|---|
-| speak / lastwords / pk_speak | 发言正文，100–200 字（硬上限 200，`features.md` §5.8） | 原文即正文；超 200 字由驱动方截断后提交 |
+| speak / lastwords / pk_speak | 发言正文，100–200 字（硬上限 250，`features.md` §5.8 / ADR-0012） | 原文即正文；超 250 字由驱动方 `clipSpeech` 截断（退到句末标点收尾）后提交 |
 | wolf | 两行：第一行狼队密聊发言（≤50 字，「过」= 无话）；第二行刀口座位号（不可 skip，§5.10 不可空刀） | `parseWolfReply`：首行剥引号后为密聊（「过」→ null），其余取首个 1–9 数字；缺票走回退随机投、密聊保留 |
 | seer | 验人座位号（不可 skip / 不验自己 / 不验已死） | 提取 1–9 数字 |
 | witch | `save`（救当夜刀口）/ 座位号（毒）/ `skip` | 先判 save / skip，再提取数字 |
@@ -287,7 +287,7 @@ anthropic-version / accept；body = `JSON.stringify(body)`）→ 90s 超时转�
 
 | phase | act(action) | body | 说明 |
 |---|---|---|---|
-| speak / lastwords / pk_speak | `speak` | `{ "text": "<正文>" }` | ≤ 200 字 |
+| speak / lastwords / pk_speak | `speak` | `{ "text": "<正文>" }` | ≤ 250 字 |
 | vote / pk_vote | `vote` | `{ "target": 5 }` 或 `{ "target": null }`（弃票） | |
 | wolf | `wolf-target` | `{ "target": 3 }` | 不可空 |
 | seer | `seer-check` | `{ "target": 4 }` | 禁自验 / 禁验死者 |

@@ -481,7 +481,7 @@ test('parseAIReply（§5.1 宽容解析）：save/skip 优先、取首个 1–9 
   assert.equal(logic.parseAIReply('seer', '不知道'), null);
   assert.equal(logic.parseAIReply('wolf', '7号'), null, '狼阶段改走 parseWolfReply 两行解析');
   const long = logic.parseAIReply('speak', '啊'.repeat(300));
-  assert.equal(long.text.length, 200, '发言超 200 字截断');
+  assert.equal(long.text.length, 250, '发言超 250 字截断');
   assert.equal(logic.parseAIReply('speak', '   '), null, '空发言 = 失败');
 });
 
