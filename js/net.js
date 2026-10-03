@@ -29,9 +29,10 @@ const CATCHUP_TIMES = 4;
 const CATCHUP_MS = 300;
 
 /* ---------- Worker 基址 ----------
- * 部署后默认 workers.dev；本机开发（localhost 打开页面）默认打本地 wrangler dev。
- * 可用 localStorage.ww_api_base 覆盖（部署到自定义域 / 反代时）。 */
-const DEFAULT_BASE = "https://werewolf-room.249939260.workers.dev";
+ * 生产走用户在 Cloudflare 配的自定义域（绕开 workers.dev 地区性 DNS 污染，ADR-0006）；
+ * 本机开发（localhost 打开页面）默认打本地 wrangler dev。
+ * 可用 localStorage.ww_api_base 覆盖；workers.dev 地址仍有效，作备用。 */
+const DEFAULT_BASE = "https://werewolf-room.xxx794665.party";
 
 /* localStorage 兜底：node 测试环境没有，用内存 Map 顶替（仅保证可 import） */
 const mem = new Map();

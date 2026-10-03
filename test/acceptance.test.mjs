@@ -471,7 +471,7 @@ class FakeStorage {
 function makeEnv() {
   const rooms = new Map();
   const env = {
-    ALLOWED_ORIGINS: 'https://xxx794665.github.io,http://localhost:8788',
+    ALLOWED_ORIGINS: 'https://werewolf.xxx794665.party,https://xxx794665.github.io,http://localhost:8788',
     ROOM: {
       idFromName: (code) => ({ name: String(code).toUpperCase() }),
       get(id) {

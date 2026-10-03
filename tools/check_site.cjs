@@ -92,6 +92,9 @@ if (toml) {
   const ao = toml.match(/^ALLOWED_ORIGINS\s*=\s*"([^"]+)"/m);
   if (ao) {
     const origins = ao[1].split(",").map((s) => s.trim());
+    if (!origins.includes("https://werewolf.xxx794665.party")) {
+      fail("ALLOWED_ORIGINS 缺前端自定义域 https://werewolf.xxx794665.party");
+    }
     if (!origins.includes("https://xxx794665.github.io")) {
       fail("ALLOWED_ORIGINS 缺 Pages 域 https://xxx794665.github.io");
     }

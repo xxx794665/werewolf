@@ -42,7 +42,7 @@
 - gh CLI 未安装：GitHub Pages 无法用 API 开启。推送后若 Pages 404，把「仓库 Settings → Pages → Branch 选 main → Save」列为用户手动一次性步骤。
 - wrangler 已在本机 login（`~/.wrangler/config/default.toml` 存在，与母本同账号）。部署：在 `worker/` 目录 `npx wrangler deploy`，或仓库根 `npx wrangler deploy --config worker/wrangler.toml`（config 内相对路径按 config 文件位置解析）。
 - node v22.20.0、npm 10.9.3。`node --test` 是内置测试器（无需 vitest 等框架）。根目录建议 `package.json {"type":"module"}`，让 node 测试直接以 ESM 加载 `shared/`、`worker/src/` 与前端模块（浏览器侧 `<script type="module">` 不受影响）。
-- 母本经验：workers.dev 域名部分地区 DNS 污染不可达，母本用自定义域反代解决；werewolf 第一版先用 workers.dev 地址，并写进 README 已知限制。
+- 母本经验：workers.dev 域名部分地区 DNS 污染不可达，母本用自定义域反代解决；werewolf 第一版先用 workers.dev 地址，2026-10-03 已跟进同款方案（后端 `werewolf-room.xxx794665.party`、前端 `werewolf.xxx794665.party`，ADR-0006）。
 
 ## 六、ponytail（懒惰高级开发哲学，全部编码代理执行）
 

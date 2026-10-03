@@ -37,5 +37,5 @@
 
 - git 远程 `git@github.com:xxx794665/werewolf.git`（SSH 可达）；本地首提交前把未出生的 `master` 改名 `main`。
 - gh CLI 未安装：Pages 开启需用户手动操作一次。
-- wrangler 已本机 login；Workers 用 workers.dev 地址（部分地区 DNS 污染，写入 README 已知限制）。
+- wrangler 已本机 login；Workers 主地址为自定义域 `https://werewolf-room.xxx794665.party`（2026-10-03 用户在 Cloudflare 配置，规避 workers.dev 地区性 DNS 污染；workers.dev 地址仍有效作备用，ADR-0006）。改 `wrangler.toml` 的 ALLOWED_ORIGINS 后必须重新 `npx wrangler deploy` 才生效。
 - 后端部署口 `worker/` 不需要 package.json（仅靠 wrangler.toml）。

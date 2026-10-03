@@ -547,7 +547,7 @@ class FakeStorage {
 function makeEnv() {
   const rooms = new Map();
   const env = {
-    ALLOWED_ORIGINS: 'https://xxx794665.github.io,http://localhost:8788',
+    ALLOWED_ORIGINS: 'https://werewolf.xxx794665.party,https://xxx794665.github.io,http://localhost:8788',
     ROOM: {
       idFromName(code) {
         return { name: String(code).toUpperCase() };
@@ -638,6 +638,8 @@ test('路由集成：CORS 只放行 ALLOWED_ORIGINS', async () => {
   const env = makeEnv();
   const ok = await worker.fetch(get('/api/health', { origin: 'https://xxx794665.github.io' }), env);
   assert.equal(ok.headers.get('access-control-allow-origin'), 'https://xxx794665.github.io');
+  const party = await worker.fetch(get('/api/health', { origin: 'https://werewolf.xxx794665.party' }), env);
+  assert.equal(party.headers.get('access-control-allow-origin'), 'https://werewolf.xxx794665.party', '自定义域主前端来源回显');
   const evil = await worker.fetch(get('/api/health', { origin: 'https://evil.example' }), env);
   assert.equal(evil.headers.get('access-control-allow-origin'), null, '非白名单来源不回 CORS 头');
   const preflight = await worker.fetch(

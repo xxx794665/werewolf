@@ -78,13 +78,13 @@ npx wrangler deploy
 
 1. 推送仓库到 `main` 分支（首次提交前若本地分支仍是 `master`，先 `git branch -m main`）。
 2. GitHub 仓库 → **Settings → Pages → Branch 选 `main`（根目录）→ Save**。gh CLI 不可用，这一步需在网页上手动操作一次（一次性）。
-3. 发布地址：`https://xxx794665.github.io/werewolf/`。
+3. 发布地址：`https://werewolf.xxx794665.party/`（用户已在 Cloudflare 把该域反代到 Pages；`https://xxx794665.github.io/werewolf/` 会 301 过去）。
 
-### 部署状态（2026-10-03 部署后核实）
+### 部署状态（2026-10-03 自定义域切换后核实）
 
-- Worker 已部署：`https://werewolf-room.249939260.workers.dev`（版本 `1e580b68`；首次部署因 compatibility_date 触发 UTC 校验报 10021，已改为 2026-10-02 重部署成功）。健康检查经外部通道实测返回 `{"ok":true}`；本机直连 workers.dev 因 DNS 污染不可达（见已知限制）。
-- 仓库已推送：6 个提交至 `origin/main`。
-- Pages 待开启：仓库 **Settings → Pages → Branch 选 `main`（根目录）→ Save**（gh CLI 未装，需网页手动一次），生效地址 `https://xxx794665.github.io/werewolf/`。
+- **前端**：`https://werewolf.xxx794665.party/`（Cloudflare 反代 GitHub Pages）——curl 实测 200。
+- **后端**：`https://werewolf-room.xxx794665.party`（Cloudflare 绑定 Worker 自定义域，版本 `136f61a4`）——本机直连可达，无 workers.dev 的 DNS 污染问题。线上实测全过：health `{"ok":true}`、新前端域 CORS 回显、建房 + 进房 + 快照按座位裁剪 + rev 游标 `unchanged`、SSRF 防护拒 `127.0.0.1`（`URL_REJECTED`）。
+- 代码：已推送 `origin/main`；前端默认后端地址 = 自定义域，workers.dev 地址仍有效作备用。
 
 ## 本地开发与自检
 
@@ -96,7 +96,7 @@ node tools/smoke-fullgame.mjs # 整局冒烟（建房开桌到终局，上游桩
 
 ## 已知限制
 
-- **workers.dev 域名 DNS 污染风险**：后端默认地址 `werewolf-room.249939260.workers.dev` 在部分地区可能被 DNS 污染不可达（母本 situation_puzzle 同款经验，本机已实际命中）。第一版先照用，不做自定义域反代（`docs/features.md` 非目标 #12）；受影响的用户可换网络环境，或部署后自配反代并经 `localStorage.ww_api_base` 覆盖接口地址。
+- **后端备用地址**：默认后端为自定义域 `werewolf-room.xxx794665.party`（2026-10-03 用户在 Cloudflare 配置，绕开了 workers.dev 的地区性 DNS 污染——本机此前实测命中过污染，见 ADR-0006）。workers.dev 地址 `werewolf-room.249939260.workers.dev` 仍有效，作备用；如需换址可用 `localStorage.ww_api_base` 覆盖接口地址，无需改部署。
 - **轮询延迟**：HTTP 短轮询（非 WebSocket），普通节奏 1.5s 一拍，无变化退避至 4s，页面回前台有追赶；狼人杀回合制下体感可接受，但动作送达有秒级延迟（ADR-0001，升级 WebSocket 属后续）。
 - **未覆盖真机实测**：截至 2026-10-03 未做真机与多端实测。移动端硬指标（热区 ≥44px、单列限宽、最小字号等）已按 `docs/features.md` §1 落实并写了前端测试，但多档视口 × 全屏走查（360/390/844×390/834/1024/1366）只覆盖桌面浏览器，首次部署后需真机过一遍。
 - **限流配额为 isolate 内存计数**：AI 中转同 IP 每日 5000 次、建房同 IP 每日 100 房，Worker 重新部署 / 休眠唤醒后清零；重度玩家一天内配额可能耗尽（单局约 60–100 次 AI 调用）。

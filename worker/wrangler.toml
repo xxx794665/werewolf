@@ -20,9 +20,9 @@ class_name = "Room"
 tag = "v1"
 new_sqlite_classes = ["Room"]
 
-# 前端允许跨域来源：GitHub Pages 站点 + 本地开发口（features.md §9）
+# 前端允许跨域来源：自定义域（主，Cloudflare 反代 GitHub Pages）+ Pages 默认域 + 本地开发口
 [vars]
-ALLOWED_ORIGINS = "https://xxx794665.github.io,http://localhost:8788"
+ALLOWED_ORIGINS = "https://werewolf.xxx794665.party,https://xxx794665.github.io,http://localhost:8788"
 
 # 观测
 [observability]

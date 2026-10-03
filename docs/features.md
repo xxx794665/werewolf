@@ -4,6 +4,7 @@
 > 基线日期：2026-10-02。参考母本：`docs/reference-situation-puzzle.md`（下称「母本」）。
 > 修订记录：ADR-0003（2026-10-03）——单机改为浏览器本地执行、联机 AI 驱动改为服务端 `drive_ai` 发起；§2 / §6 / §7.6 / §8.1 / §9 / §13.9 已同步。
 > 修订记录：2026-10-03 文档收口——§8.3 提示词落点改为 `shared/prompts.js`（js/prompts.js 薄转发）、§12 目录蓝图标注实际结构以 `docs/PROJECT.md` 为准；均为实现位置的事实同步，不改冻结口径。
+> 修订记录：2026-10-03 自定义域切换——前端 `werewolf.xxx794665.party`（反代 Pages）、后端 `werewolf-room.xxx794665.party`（绑定 Worker）由用户在 Cloudflare 配置完成；代码侧同步 net.js 默认地址与 CORS 白名单（ADR-0006），非目标 #12 就此完成。
 
 ## 0. 一句话定位
 
@@ -188,7 +189,7 @@
 - 上述目录树为开工蓝图，与实际落地已有差异：实际结构以 `docs/PROJECT.md` 为准（test/ 按模块拆为 6 个文件；`worker/src/` 拆出 room-logic / ai-proxy / rate-limit / do-rpc；`shared/` 增 prompts.js；`js/` 增 icons.js 且 prompts.js 为薄转发；新增 `tools/` 自检脚本）。本节树保留开工原貌，仅作历史参考。
 - `package.json` 需补 `scripts.test = "node --test"`，让 `npm test` 可用。
 - 部署：`worker/` 目录 `npx wrangler deploy`（wrangler 已本机 login）。git：首提交前把未出生的 `master` 改名 `main`；gh CLI 未安装，Pages 需用户在仓库 Settings → Pages 手动选 main 一次。
-- workers.dev 域名部分地区 DNS 污染：第一版照用 workers.dev，写进 README 已知限制。
+- 域名：前端与后端走用户配置的自定义域（`werewolf.xxx794665.party` / `werewolf-room.xxx794665.party`，2026-10-03）；workers.dev 仅作备用地址（DNS 污染风险见 README）。
 
 ## 13. 非目标（明确砍掉 / 延后）
 
@@ -203,6 +204,6 @@
 9. 服务端 AI 防伪 / 反作弊（联机互信模型：联机 AI 行动由 `drive_ai` 服务端执行，房主的触发时机与 BYO 上游可被操纵、提示词结果不可信；房主作为玩家仍可经保留接口 `ai_view` 读到 AI / 托管座位私有视角、可推知 AI 阵营信息——均接受）。
 10. Anthropic / Gemini 原生 API 格式（仅 OpenAI 兼容；Anthropic 兼容网关可用即达标）。
 11. 空刀、白天自由插话、多语言、自定义发言字数。
-12. workers.dev 污染的自定义域反代。
+12. workers.dev 污染的自定义域反代 —— 已于 2026-10-03 由用户在 Cloudflare 配置完成（前端 werewolf.xxx794665.party、后端 werewolf-room.xxx794665.party，ADR-0006），不再是非目标。
 13. 同名接管（uid 重连 + AI 托管已覆盖）。
 14. 房主转移（房主失联 30 分钟房间直接作废重建，不做转让）。
