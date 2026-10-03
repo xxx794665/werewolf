@@ -270,7 +270,8 @@ const onlineActions = {
 /* ---- 房主驱动 AI（§7.6：快照 owner == me 才驱动） ----
  * 夜里房主自己的快照也是冻结的（§4.1.6），驱动不能依赖快照变化，
  * 故除快照触发外另有一个 4s 兜底节拍；drive_ai 在无 AI 待行动时回错即停。
- * 房主没配 AI 时不空转：DO 的 150s 行动超时回退兜底（§5.11）。 */
+ * 未配置自有接口也照常驱动：走内置体验通道（key 由 Worker Secret 注入），
+ * 体验通道不可用时 DO 的 150s 行动超时回退兜底（§5.11）。 */
 
 let aiTimer = null;
 let aiDriving = false;
@@ -279,7 +280,6 @@ function maybeDriveAI(s) {
   if (mode !== "online" || !s) return;
   if (s.owner !== net.me().uid) return;
   if (s.phase !== "night" && s.phase !== "day") return;
-  if (!ai.hasConfig()) return;
   if (!aiTimer) {
     aiTimer = setTimeout(() => {
       aiTimer = null;
@@ -292,7 +292,7 @@ async function driveLoop() {
   if (aiDriving) return;
   aiDriving = true;
   try {
-    const cfg = ai.loadConfig();
+    const cfg = ai.effectiveConfig(); // 自带配置优先，空配置走体验通道
     for (let i = 0; i < 12; i++) {
       const r = await net.driveAI(cfg); // 一次调用 = 一个 AI 座位行动（服务端组装 + 回退兜底）
       if (!r || !r.ok) break; // NO_PENDING / STALE / BUSY / FORBIDDEN → 等下个触发
@@ -357,7 +357,7 @@ function bind() {
   $("solo-start").addEventListener("click", () => {
     const nick = takeNick("solo-nick");
     if (!nick) return;
-    if (!ai.hasConfig()) ui.toast("未配置 AI 接口：AI 将使用兜底发言与随机行动（可在 AI 设置里配置）");
+    if (!ai.hasConfig()) ui.toast("未配置自有 AI 接口：AI 走内置体验通道（可在 AI 设置里换成自己的）");
     ui.showConfirm(`以「${nick}」开始单机对局（你 + 8 个 AI）`, () => startSolo(nick));
   });
 

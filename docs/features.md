@@ -128,6 +128,7 @@
 - **喂给 AI 的历史窗口**：最近 2 个完整白天全量（发言 / 遗言 / PK / 投票去向），更早天数压缩为死讯流水行（如「第 2 天：5 号被放逐，翻牌猎人带走 8 号」）；再超限则从最旧开始丢弃，保证请求体远低于 64KB 上限。
 - `baseUrl` 用户填完整前缀（如 `https://api.openai.com/v1`），前端拼 `/chat/completions`。
 - **所有请求经 Worker `/api/ai-proxy` 转发**（浏览器不直连上游，解决 CORS）；Key 只存浏览器 localStorage、按请求透传，服务端不落盘。
+- **内置体验通道（ADR-0008，2026-10-03）**：用户未配置 BYO 时自动回退——前端 `effectiveConfig()` 用内置默认 `baseUrl / model`（非机密，进源码）且不带 `authorization` 头；Worker 对「无 key 且出站 URL 以体验通道 baseUrl 开头」的请求注入 Secret `DEFAULT_AI_KEY`（凭据只存 Worker Secret，源码 / wrangler.toml / 前端均不出现）。注入前提绑定默认 baseUrl：Bearer 永不被带去其他主机；自带 key 的请求原样透传不覆盖；他域请求永不注入。体验通道共享同一 key，滥用面由同 IP 5000 次/日限流兜住（共享 key 被刷属已知取舍，见 ADR-0008）。
 - 转发头白名单：content-type / authorization / x-api-key / anthropic-version / accept；body ≤ 64KB；响应 ≤ 1MB；同 IP 日调用上限 **5000 次**（isolate 内存 Map，重启清零；单局约 60–100 次调用，够 50+ 局；重度玩家配额耗尽属于已知限制，写 README）。
 
 ### 8.3 角色提示词（每个角色一份，实现在 `shared/prompts.js`）
@@ -152,9 +153,9 @@
 ## 9. Worker API 路由（照母本）
 
 - `POST /api/room/new`：建房，返回 6 位房号。建房限流：同 IP 每日 100 房（isolate 内存 Map，重启清零；单机本地执行后仅联机建房消耗该配额）。
-- `POST /api/room/:code/*`：房内动作转发给 DO（DO 内统一 `fetch(?action=…)` 分发，幂等）。动作含 `join / ready / start / speak / vote / wolf-chat / wolf-target / seer-check / witch-move / hunter-shoot / heartbeat`，以及：**`drive_ai`（联机 AI 驱动，owner 专属，ADR-0003）**：`act(action=drive_ai)` 由房主触发并随请求透传 BYO baseUrl / model / key，DO 校验请求者 uid == 房主且当前待行动座位是 AI 座位或托管中座位 → 组装提示词 → url-guard → 上游 → 结果写回状态机，失败走确定性回退（狼阶段一次调用两段提交：先密聊后投票，缺票走回退）；**`ai_view`（owner 专属，保留接口，ADR-0002）**：`act(action=ai_view, seat=N)` → DO 校验请求者 uid == 房主且目标座位是 AI 座位或托管中座位，返回**该座位**的完整私有视角（身份卡、狼队友 / 刀口、密聊、验史、用药状态）；校验不过返回错误，不泄任何内容。
+- `POST /api/room/:code/*`：房内动作转发给 DO（DO 内统一 `fetch(?action=…)` 分发，幂等）。动作含 `join / ready / start / speak / vote / wolf-chat / wolf-target / seer-check / witch-move / hunter-shoot / heartbeat`，以及：**`drive_ai`（联机 AI 驱动，owner 专属，ADR-0003）**：`act(action=drive_ai)` 由房主触发并随请求透传 BYO baseUrl / model / key，DO 校验请求者 uid == 房主且当前待行动座位是 AI 座位或托管中座位 → 组装提示词 → url-guard → 上游（房主未带 key 且目标为体验通道 baseUrl 时注入 Secret，§8.2）→ 结果写回状态机，失败走确定性回退（狼阶段一次调用两段提交：先密聊后投票，缺票走回退）；**`ai_view`（owner 专属，保留接口，ADR-0002）**：`act(action=ai_view, seat=N)` → DO 校验请求者 uid == 房主且目标座位是 AI 座位或托管中座位，返回**该座位**的完整私有视角（身份卡、狼队友 / 刀口、密聊、验史、用药状态）；校验不过返回错误，不泄任何内容。
 - `GET /api/room/:code/state`：轮询快照（**按座位视角计算的 `rev` 游标**，无变化回 `unchanged`；夜里非行动者视角冻结，§2 / §4.1.6）。
-- `POST /api/ai-proxy`：AI 转发（§8.2）。
+- `POST /api/ai-proxy`：AI 转发（§8.2；体验通道 key 注入见 §8.2 / ADR-0008）。
 - `GET /api/health`：健康检查。
 - CORS 只放行 `ALLOWED_ORIGINS`（`[vars]`：`https://xxx794665.github.io` 与 `http://localhost:8788` 开发用）。
 

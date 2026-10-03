@@ -18,7 +18,7 @@
 import * as logic from './room-logic.js';
 import * as game from '../../shared/game.js';
 import { checkUrl } from './url-guard.js';
-import { proxyFetch, UPSTREAM_TIMEOUT_MS } from './ai-proxy.js';
+import { proxyFetch, UPSTREAM_TIMEOUT_MS, isDefaultAiUrl } from './ai-proxy.js';
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -170,7 +170,11 @@ export class Room {
       let text = null;
       if (!req.error) {
         const guard = checkUrl(req.url);
-        if (guard == null) text = await this.fetchAI(req.url, req.body, body.key);
+        if (guard == null) {
+          /* 体验通道：房主未带 key 且目标是体验通道上游 → 注入 Secret（与 /api/ai-proxy 同口径） */
+          const outKey = body.key || (this.env.DEFAULT_AI_KEY && isDefaultAiUrl(req.url) ? this.env.DEFAULT_AI_KEY : '');
+          text = await this.fetchAI(req.url, req.body, outKey);
+        }
       }
       const phase = logic.phaseOf(fresh.game);
       const wolf = phase === 'wolf' && text != null ? logic.parseWolfReply(text) : null; // §4.1.1 两行格式

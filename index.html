@@ -30,7 +30,7 @@
         <button class="btn" type="button" data-goto="screen-online">联机房间</button>
         <button class="btn" type="button" data-goto="screen-settings">AI 设置</button>
       </nav>
-      <p class="hint">AI 由你自带接口（BYO Key）。第一次玩请先进「AI 设置」填好接口地址与 Key。</p>
+      <p class="hint">不配置也能玩：AI 默认走内置体验通道。想用自己的模型，进「AI 设置」填接口地址与 Key（BYO）。</p>
     </section>
 
     <!-- ============ 屏：单机开局（features.md §6） ============ -->
@@ -128,7 +128,8 @@
 
     <!-- ============ 屏：AI 设置 BYO（features.md §8.2） ============ -->
     <section class="screen" id="screen-settings" hidden>
-      <h2>AI 设置（自带 Key）</h2>
+      <h2>AI 设置（自带 Key，可不填）</h2>
+      <p class="hint">什么都不填 = 使用内置体验通道（模型 cline-pass/deepseek-v4.1-flash）。填写以下字段则覆盖为你的接口。</p>
       <label class="field"><span class="field-label">接口地址（OpenAI 兼容）</span>
         <input id="cfg-baseurl" autocomplete="off" placeholder="https://api.openai.com/v1">
       </label>

@@ -3,7 +3,8 @@
  * ------------------------------------------------------------
  * 职责（docs/ai-prompts.md §5 数据契约的浏览器侧实现）：
  *   - BYO 配置读写：baseUrl / apiKey / model 只存 localStorage，按请求透传，
- *     服务端不落盘（features.md §8.2）
+ *     服务端不落盘（features.md §8.2）；未配置时回退内置体验通道
+ *     effectiveConfig()（key 由 Worker Secret 注入，前端不接触凭据）
  *   - requestChat(messages)：唯一请求格式（§5.0）经 Worker /api/ai-proxy 转发
  *     （浏览器不直连上游，解 CORS）；30s 超时、失败重试 1 次（§8.4）
  *   - parseReply(phase, text)：§5.1 宽容解析，归属本文件（§6 已知边界 3）
@@ -22,6 +23,24 @@ import { apiBase } from "./net.js";
 
 const REQ_TIMEOUT_MS = 30_000; // §8.4 单次请求超时
 const RETRY = 2; // 共尝试 2 次（失败重试 1 次）
+
+/* ---------- 内置体验通道（试用用户零配置可玩） ----------
+ * baseUrl / model 非机密可进源码；API Key 存 Worker Secret（DEFAULT_AI_KEY），
+ * 由 Worker 对「未带 key 且目标为本 baseUrl」的请求注入——前端永不接触凭据，
+ * key 只发往体验通道上游（防 Bearer 被带去任意主机）。与 worker/src/ai-proxy.js
+ * DEFAULT_AI_BASE 同口径（两边刻意各自持有，漂移风险同 windowHistory）。 */
+export const DEFAULT_AI = {
+  baseUrl: "https://api.cline.bot/api/v1",
+  model: "cline-pass/deepseek-v4.1-flash",
+};
+
+/**
+ * 实际生效配置：用户自带配置优先，未配置（baseUrl / model 缺）时回退体验通道。
+ * key 为空 → 请求不带 authorization 头 → Worker 注入体验通道 key。
+ */
+export function effectiveConfig(cfg = loadConfig()) {
+  return cfg.baseUrl && cfg.model ? cfg : { ...DEFAULT_AI, key: "" };
+}
 
 /* ---------- BYO 配置（localStorage，key 前缀 ww_ai_） ---------- */
 
@@ -43,7 +62,7 @@ export function saveConfig({ baseUrl, key, model }) {
 
 export function hasConfig() {
   const c = loadConfig();
-  return !!(c.baseUrl && c.model); // key 可空（本地网关类上游不要 Key）
+  return !!(c.baseUrl && c.model); // 语义 = 用户自带配置（体验通道恒可用，见 effectiveConfig）
 }
 
 /* ---------- AI 请求（§5.0 唯一格式 + §5.2 信封） ---------- */
@@ -54,7 +73,7 @@ export function hasConfig() {
  * 调用方按 §8.4 走确定性回退（shared/game.js applyFallback）。
  */
 export async function requestChat(messages) {
-  const cfg = loadConfig();
+  const cfg = effectiveConfig(); // 自带配置优先，空配置回退体验通道（key 由 Worker 注入）
   if (!cfg.baseUrl || !cfg.model) return null;
   const envelope = {
     url: cfg.baseUrl + "/chat/completions", // §5.2：前端拼完整地址
@@ -326,11 +345,12 @@ export async function decideFor(g, log, seat) {
 /* ---------- AI 设置：测试连接（短提示词探活，不走游戏流程） ---------- */
 
 /**
- * 用当前配置发一条最小请求探活（与游戏同走 /api/ai-proxy，测的是完整链路）。
+ * 用给定配置（缺省 = 输入框空值时走体验通道）发一条最小请求探活
+ * （与游戏同走 /api/ai-proxy，测的是完整链路）。
  * 单次尝试不重试（快速反馈）。返回 { ok, ms?, reply?, error? }，error 为可读原因。
  */
 export async function testConnection(cfg = loadConfig()) {
-  if (!cfg.baseUrl || !cfg.model) return { ok: false, error: "先填接口地址与模型名" };
+  cfg = effectiveConfig(cfg);
   if (!/^https?:\/\//i.test(cfg.baseUrl)) return { ok: false, error: "接口地址必须以 http:// 或 https:// 开头" };
   const started = Date.now();
   const ctrl = new AbortController();

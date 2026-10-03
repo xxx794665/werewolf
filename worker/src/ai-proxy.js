@@ -18,6 +18,16 @@
 
 import { safeOutboundUrl } from './url-guard.js';
 
+/* 内置体验通道（默认 AI 通道）baseUrl——与 js/ai.js 的 DEFAULT_AI 同口径（两边
+   刻意各自持有，漂移风险同 windowHistory，改任一边同步另一边）。Key 不在此文件：
+   经 Worker Secret DEFAULT_AI_KEY 注入（凭据不进源码，features.md §8.2 延伸）。 */
+export const DEFAULT_AI_BASE = 'https://api.cline.bot/api/v1';
+
+/** 出站 URL 是否指向体验通道上游（key 注入的唯一前提，防 Bearer 被带去任意主机）。 */
+export function isDefaultAiUrl(url) {
+  return typeof url === 'string' && url.toLowerCase().startsWith(DEFAULT_AI_BASE.toLowerCase() + '/');
+}
+
 const HEADER_WHITELIST = ['content-type', 'authorization', 'x-api-key', 'anthropic-version', 'accept'];
 const BODY_MAX_BYTES = 64 * 1024; // 请求体上限（features.md §8.2）
 const RESP_MAX_CHARS = 1024 * 1024; // 响应上限 1MB（ponytail: 按 text.length 近似）

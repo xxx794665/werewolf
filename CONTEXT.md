@@ -45,6 +45,7 @@
 | AI 补位 | 开桌时真人不足 9，由 AI 补足到 9（有空位一律先提示房主确认） |
 | AI 驱动者 | 发起 AI 请求的驱动方：单机 = 玩家本人浏览器（buildMessages + /api/ai-proxy，客户端路径）；联机 = 房主浏览器调 `drive_ai`（服务端发起路径，Key 按请求瞬态透传，ADR-0003）；掉线则 AI 暂停（有 150s 确定性回退兜底） |
 | BYO | Bring Your Own（Key/模型）：用户自带 baseUrl / API Key / 模型名，存浏览器 localStorage |
+| 体验通道 | 未配置 BYO 时的默认 AI 通道（ADR-0008）：前端内置 baseUrl/model 常量、不带 key，Worker 对指向该 baseUrl 的无 key 请求注入 Secret `DEFAULT_AI_KEY`——key 只发往体验通道上游，永不外带 |
 | ai-proxy | Worker 的 `/api/ai-proxy`：服务端转发 AI 请求，解浏览器 CORS，Key 不落盘 |
 | url-guard | 服务端出站 URL 校验纯函数（仅 http/https、拒绝 localhost/环回/私网/保留地址），一切出站 fetch 前必过 |
 | DO | Durable Object，一个房间 = 一个 DO 实例，游戏状态机与唯一权威 |

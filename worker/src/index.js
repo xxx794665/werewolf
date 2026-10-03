@@ -18,7 +18,7 @@
  * DO 类从本入口导出（wrangler main）。
  * ============================================================ */
 
-import { aiProxyLimited, buildProxyRequest, proxyFetch, UPSTREAM_TIMEOUT_MS } from './ai-proxy.js';
+import { aiProxyLimited, buildProxyRequest, proxyFetch, UPSTREAM_TIMEOUT_MS, isDefaultAiUrl } from './ai-proxy.js';
 import { doRpc, roomStub } from './do-rpc.js';
 import { newRoomLimited } from './rate-limit.js';
 
@@ -135,6 +135,11 @@ export default {
       const built = buildProxyRequest(envelope, request.headers);
       if (built.error) {
         return reply({ error: built.error.code, message: built.error.message }, built.error.status);
+      }
+      /* 体验通道：请求未带 key 且目标就是体验通道上游 → 注入 Secret（features.md §8.2）。
+         key 只发往默认 baseUrl，绝不被带去其他主机；滥用面由 aiProxyLimited 兜住。 */
+      if (!built.headers.authorization && env.DEFAULT_AI_KEY && isDefaultAiUrl(built.url)) {
+        built.headers.authorization = `Bearer ${env.DEFAULT_AI_KEY}`;
       }
       const out = await proxyFetch(built.url, built.headers, built.payload, UPSTREAM_TIMEOUT_MS);
       if (out.error) return reply({ error: out.error, message: out.message }, 502);

@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { checkUrl } from '../worker/src/url-guard.js';
 import * as logic from '../worker/src/room-logic.js';
 import * as game from '../shared/game.js';
-import { buildProxyRequest, proxyFetch, aiProxyLimited, resetRateLimiterForTests } from '../worker/src/ai-proxy.js';
+import { buildProxyRequest, proxyFetch, aiProxyLimited, resetRateLimiterForTests, isDefaultAiUrl, DEFAULT_AI_BASE } from '../worker/src/ai-proxy.js';
 import worker, { resetRoomLimiterForTests } from '../worker/src/index.js';
 import { Room } from '../worker/src/room.js';
 
@@ -811,4 +811,46 @@ test('路由集成：建房限流同 IP 每日 100 房；ai-proxy 拒绝内网 U
   assert.equal(rejected.status, 400);
   assert.equal((await rejected.json()).error, 'URL_REJECTED');
   resetRateLimiterForTests();
+});
+
+test('体验通道：默认上游且无 key → 注入 Secret；自带 key 原样透传；他域不注入', async () => {
+  assert.ok(isDefaultAiUrl(DEFAULT_AI_BASE + '/chat/completions'));
+  assert.ok(!isDefaultAiUrl('https://evil.example/v1/chat/completions'), '他域不命中默认通道');
+  assert.ok(!isDefaultAiUrl(DEFAULT_AI_BASE), '裸 base（无路径）不命中，注入只随完整出站 URL');
+  const env = makeEnv();
+  env.DEFAULT_AI_KEY = 'test-injected-key';
+  const ip = { 'cf-connecting-ip': '203.0.113.9' };
+  const seen = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), auth: (init.headers && init.headers.authorization) || null });
+    return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  try {
+    const r1 = await worker.fetch(
+      post('/api/ai-proxy', { url: DEFAULT_AI_BASE + '/chat/completions', body: { model: 'm', messages: [] } }, ip),
+      env
+    );
+    assert.equal(r1.status, 200);
+    const r2 = await worker.fetch(
+      post('/api/ai-proxy', { url: DEFAULT_AI_BASE + '/chat/completions', body: { model: 'm', messages: [] } }, { ...ip, authorization: 'Bearer mine' }),
+      env
+    );
+    assert.equal(r2.status, 200);
+    const r3 = await worker.fetch(
+      post('/api/ai-proxy', { url: 'https://api.example.com/v1/chat/completions', body: { model: 'm', messages: [] } }, ip),
+      env
+    );
+    assert.equal(r3.status, 200);
+  } finally {
+    globalThis.fetch = realFetch;
+    resetRateLimiterForTests();
+  }
+  assert.equal(seen.length, 3);
+  assert.equal(seen[0].auth, 'Bearer test-injected-key', '无 key + 默认上游 → 注入 Secret');
+  assert.equal(seen[1].auth, 'Bearer mine', '自带 key 原样透传，不覆盖');
+  assert.equal(seen[2].auth, null, '他域永不注入，Bearer 不外带');
 });
