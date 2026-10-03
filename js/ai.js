@@ -89,7 +89,8 @@ export async function requestChat(messages) {
 }
 
 /* ---------- §5.1 响应解析（宽容序：save/skip → 第一个 1–9 数字） ----------
- * 返回 shared/game.js 内核动作（不带 seat，调用方补）；解析失败返回 null → 回退。 */
+ * 返回 shared/game.js 内核动作（不带 seat，调用方补）；解析失败返回 null → 回退。
+ * 狼阶段是两行格式（密聊 + 投票），不走此函数，见 parseWolfReply。 */
 export function parseReply(phase, text) {
   if (typeof text !== "string") return null;
   if (phase === "speak" || phase === "lastwords" || phase === "pk_speak") {
@@ -108,8 +109,6 @@ export function parseReply(phase, text) {
   if (!m) return null;
   const n = Number(m[0]);
   switch (phase) {
-    case "wolf":
-      return { type: "wolf_target", target: n };
     case "seer":
       return { type: "seer_check", target: n };
     case "witch":
@@ -122,6 +121,38 @@ export function parseReply(phase, text) {
     default:
       return null;
   }
+}
+
+/**
+ * §4.1.1 狼阶段两行回复解析（与 worker/src/room-logic.js parseWolfReply 同口径）：
+ * 第一行 = 密聊发言（「过」/空 → null），第二行（或剩余文本）第一个 1–9 数字 = 投票。
+ * target 为 null 时调用方走确定性回退随机投票，密聊内容保留。
+ */
+export function parseWolfReply(text) {
+  const out = { chat: null, target: null };
+  if (typeof text !== "string") return out;
+  const lines = String(text)
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return out;
+  const strip = (l) => l.replace(/[\s.,;:!?，。；：！？、"'`()[\]{}<>《》-]/g, "");
+  if (lines.length === 1) {
+    const one = strip(lines[0]);
+    if (/^[1-9]$/.test(one)) out.target = Number(one);
+    else out.chat = cleanChat(lines[0]);
+    return out;
+  }
+  out.chat = cleanChat(lines[0]);
+  const m = lines.slice(1).join(" ").match(/[1-9]/);
+  out.target = m ? Number(m[0]) : null;
+  return out;
+}
+
+function cleanChat(line) {
+  const t = line.replace(/^["'「『]+|["'」』]+$/g, "").trim();
+  if (!t || ["过", "pass", "skip", "无", "没事"].includes(t.toLowerCase())) return null;
+  return t.slice(0, 60); // 与内核 WOLF_CHAT_MAX 同口径截断
 }
 
 /* ---------- 内核公开事件 → §1.3 history（单机本地账本用） ---------- */
@@ -245,7 +276,14 @@ export function roleCardOf(g, seat) {
   const p = g.players[seat - 1];
   if (!p) return null;
   const card = { seat, role: PROMPT_ROLE[p.role] || p.role };
-  if (p.role === "werewolf") card.wolves = g.players.filter((x) => x && x.role === "werewolf").map((x) => x.seat);
+  if (p.role === "werewolf") {
+    card.wolves = g.players.filter((x) => x && x.role === "werewolf").map((x) => x.seat);
+    if (g.phase === "night" && g.subPhase === "wolf" && g.night) {
+      card.wolfChat = g.night.wolfChat || []; // §4.1.1 狼自己的私有频道进 roleCard（上下文铁律不破）
+      card.wolfVotes = g.night.wolfVotes || {};
+      card.captain = game.wolfCaptain(g);
+    }
+  }
   if (p.role === "seer") {
     card.checks = (g.seerChecks || []).map((c) => ({ night: c.night, seat: c.target, result: c.isWolf ? "wolf" : "good" }));
   }
@@ -260,19 +298,71 @@ export function roleCardOf(g, seat) {
 
 /**
  * 单机：为 AI 座位跑一次「取卡 → 组消息 → 请求 → 解析」。
- * 返回 { action }（内核动作，含 seat）或 { action: null }（请求失败，调用方走回退）。
+ * 返回 { chat, action }：chat 为狼队密聊内容（wolf 阶段可能非 null，调用方先提交）；
+ * action 为内核动作（含 seat），null = 请求失败 / 无有效投票，调用方走回退。
  * buildMessages 抛错（白名单 / 角色强一致校验）按请求失败处理（§1.4 / §8.4）。
  */
 export async function decideFor(g, log, seat) {
   const phase = phaseOf(g);
-  if (!phase) return { action: null };
+  if (!phase) return { chat: null, action: null };
   try {
     const card = roleCardOf(g, seat);
     const messages = buildMessages(windowHistory(log), card, phase);
     const text = await requestChat(messages);
+    if (phase === "wolf") {
+      const w = text != null ? parseWolfReply(text) : { chat: null, target: null };
+      return {
+        chat: w.chat,
+        action: w.target != null ? { type: "wolf_target", target: w.target, seat } : null,
+      };
+    }
     const parsed = text != null ? parseReply(phase, text) : null;
-    return { action: parsed ? { ...parsed, seat } : null };
+    return { chat: null, action: parsed ? { ...parsed, seat } : null };
   } catch (e) {
-    return { action: null };
+    return { chat: null, action: null };
+  }
+}
+
+/* ---------- AI 设置：测试连接（短提示词探活，不走游戏流程） ---------- */
+
+/**
+ * 用当前配置发一条最小请求探活（与游戏同走 /api/ai-proxy，测的是完整链路）。
+ * 单次尝试不重试（快速反馈）。返回 { ok, ms?, reply?, error? }，error 为可读原因。
+ */
+export async function testConnection(cfg = loadConfig()) {
+  if (!cfg.baseUrl || !cfg.model) return { ok: false, error: "先填接口地址与模型名" };
+  if (!/^https?:\/\//i.test(cfg.baseUrl)) return { ok: false, error: "接口地址必须以 http:// 或 https:// 开头" };
+  const started = Date.now();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  try {
+    const headers = { "content-type": "application/json" };
+    if (cfg.key) headers.authorization = `Bearer ${cfg.key}`;
+    const res = await fetch(apiBase() + "/api/ai-proxy", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        url: cfg.baseUrl.replace(/\/+$/, "") + "/chat/completions",
+        body: {
+          model: cfg.model,
+          messages: [{ role: "user", content: "连接测试：请只回复两个字——正常" }],
+          temperature: 0,
+          max_tokens: 16,
+        },
+      }),
+      signal: ctrl.signal,
+    });
+    const j = await res.json().catch(() => null);
+    if (!res.ok) {
+      const reason = j && (j.message || j.error);
+      return { ok: false, error: `HTTP ${res.status}${reason ? "：" + reason : ""}` };
+    }
+    const content = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+    if (typeof content !== "string" || !content.trim()) return { ok: false, error: "上游返回了空回复" };
+    return { ok: true, ms: Date.now() - started, reply: content.trim().slice(0, 40) };
+  } catch (e) {
+    return { ok: false, error: e && e.name === "AbortError" ? "超时（15 秒无响应）" : "网络请求失败（检查地址与网络）" };
+  } finally {
+    clearTimeout(timer);
   }
 }

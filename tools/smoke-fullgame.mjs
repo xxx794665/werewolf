@@ -78,15 +78,25 @@ while (guard++ < 500) {
   if (pending == null) break;
   const p = room.room.game.players[pending - 1];
   if (!p.isAI && !room.room.hosted.includes(pending)) {
-    // 真人座位：以该座位 uid 提交（弃票 / 跳过 / 兜底句），模拟真人玩家
     const kind = `${room.room.game.phase}:${room.room.game.subPhase}`;
-    const act = ACTION_OF[kind] || 'speak';
-    const body = (BODY_OF[kind] || (() => ({ text: '我先听听大家的意见。' })))(
-      game.applyFallback(room.room.game, pending)
-    );
-    const r = await rpc(act, { uid: p.uid, ...body });
-    if (r.status !== 200) throw new Error(`human ${act}: ${JSON.stringify(r.json)}`);
-    via.human++;
+    if (kind === 'night:wolf') {
+      // §4.1.1 狼人真人：先密聊一句再投票（目标取第一个存活座位；刀队友/自刀均合法）
+      const alive = room.room.game.players.filter((x) => x && x.alive).map((x) => x.seat);
+      const c = await rpc('wolf-chat', { uid: p.uid, text: '听我口型，白天别露馅' });
+      if (c.status !== 200) throw new Error('wolf-chat: ' + JSON.stringify(c.json));
+      const v = await rpc('wolf-target', { uid: p.uid, target: alive[0] });
+      if (v.status !== 200) throw new Error('wolf-target: ' + JSON.stringify(v.json));
+      via.human++;
+    } else {
+      // 其余真人座位：以该座位 uid 提交（弃票 / 跳过 / 兜底句），模拟真人玩家
+      const act = ACTION_OF[kind] || 'speak';
+      const body = (BODY_OF[kind] || (() => ({ text: '我先听听大家的意见。' })))(
+        game.applyFallback(room.room.game, pending)
+      );
+      const r = await rpc(act, { uid: p.uid, ...body });
+      if (r.status !== 200) throw new Error(`human ${act}: ${JSON.stringify(r.json)}`);
+      via.human++;
+    }
   } else {
     const r = await rpc('drive_ai', { uid: 'o1', baseUrl: 'https://api.openai.com/v1', model: 'm', key: 'k' });
     if (r.status === 200) via[r.json.via]++;

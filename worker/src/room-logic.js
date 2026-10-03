@@ -131,7 +131,13 @@ function privateOf(g, me) {
   const you = { seat: me.seat, alive: !!me.alive, role: me.role };
   if (me.role === 'werewolf') {
     you.wolves = g.players.filter((p) => p && p.role === 'werewolf').map((p) => p.seat);
-    if (g.phase === 'night' && me.alive && g.night && g.night.blade != null) you.blade = g.night.blade;
+    if (g.phase === 'night' && me.alive && g.night) {
+      if (g.night.blade != null) you.blade = g.night.blade;
+      // §4.1.1 狼队密聊与定刀投票：仅存活狼座可见（死者走观战视角，另无此字段）
+      you.wolfChat = g.night.wolfChat || [];
+      you.wolfVotes = g.night.wolfVotes || {};
+      you.captain = game.wolfCaptain(g); // 平票裁定者（由存活狼推得，狼座本可知）
+    }
   }
   if (me.role === 'seer') {
     you.checks = (g.seerChecks || []).map((c) => ({ night: c.night, seat: c.target, result: c.isWolf ? 'wolf' : 'good' }));
@@ -189,6 +195,9 @@ export function snapshotFor(room, seat) {
   });
   if (me) snap.you = privateOf(g, me);
   if (me && pending === me.seat && phaseOf(g)) snap.action = { kind: phaseOf(g) };
+  else if (me && me.alive && me.role === 'werewolf' && g.phase === 'night' && g.subPhase === 'wolf') {
+    snap.action = { kind: 'wolf' }; // §4.1.1 狼队密聊+投票全员开放；非狼座位绝不带此字段
+  }
   if (!revealed && g.phase !== 'lobby' && pending != null && !room.ownerOnline) {
     const p = g.players[pending - 1];
     if (p && (p.isAI || room.hosted.includes(pending))) snap.waitingOwner = true; // §7.6 等待房主
@@ -267,6 +276,7 @@ function toHistory(ev) {
 const GAME_ACTIONS = {
   speak: (b, seat) => ({ type: 'speak', seat, text: b.text }),
   vote: (b, seat) => ({ type: 'vote', seat, target: b.target }),
+  'wolf-chat': (b, seat) => ({ type: 'wolf_chat', seat, text: b.text }),
   'wolf-target': (b, seat) => ({ type: 'wolf_target', seat, target: b.target }),
   'seer-check': (b, seat) => ({ type: 'seer_check', seat, target: b.target }),
   'witch-move': (b, seat) => ({ type: 'witch_move', seat, move: b.move, target: b.target }),
@@ -393,7 +403,14 @@ export function roleCardOf(g, seat) {
   const p = g.players[seat - 1];
   if (!p) return null;
   const card = { seat, role: PROMPT_ROLE[p.role] || p.role };
-  if (p.role === 'werewolf') card.wolves = g.players.filter((x) => x && x.role === 'werewolf').map((x) => x.seat);
+  if (p.role === 'werewolf') {
+    card.wolves = g.players.filter((x) => x && x.role === 'werewolf').map((x) => x.seat);
+    if (g.phase === 'night' && g.subPhase === 'wolf' && g.night) {
+      card.wolfChat = g.night.wolfChat || []; // §4.1.1 狼自己的私有频道进 roleCard（上下文铁律不破）
+      card.wolfVotes = g.night.wolfVotes || {};
+      card.captain = game.wolfCaptain(g);
+    }
+  }
   if (p.role === 'seer') card.checks = (g.seerChecks || []).map((c) => ({ night: c.night, seat: c.target, result: c.isWolf ? 'wolf' : 'good' }));
   if (p.role === 'witch' && g.witch) {
     card.antidote = g.witch.antidote > 0;
@@ -487,7 +504,40 @@ export function buildAIRequest(room, seat, cfg) {
   }
 }
 
-/** §5.1 宽容解析：先判 save / skip，再取第一个 1–9 数字；失败返回 null（回退）。 */
+/**
+ * §4.1.1 狼阶段回复解析（两行格式）：第一行密聊发言（「过」/空 → 无话），
+ * 第二行（或剩余文本）取第一个 1–9 数字为投票。target 为 null 时调用方走
+ * 确定性回退随机投票，密聊内容保留。
+ */
+export function parseWolfReply(text) {
+  const out = { chat: null, target: null };
+  if (typeof text !== 'string') return out;
+  const lines = String(text)
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return out;
+  const strip = (l) => l.replace(/[\s.,;:!?，。；：！？、"'`()[\]{}<>《》-]/g, '');
+  if (lines.length === 1) {
+    const one = strip(lines[0]);
+    if (/^[1-9]$/.test(one)) out.target = Number(one);
+    else out.chat = cleanChat(lines[0]);
+    return out;
+  }
+  out.chat = cleanChat(lines[0]);
+  const m = lines.slice(1).join(' ').match(/[1-9]/);
+  out.target = m ? Number(m[0]) : null;
+  return out;
+}
+
+function cleanChat(line) {
+  const t = line.replace(/^["'「『]+|["'」』]+$/g, '').trim();
+  if (!t || ['过', 'pass', 'skip', '无', '没事'].includes(t.toLowerCase())) return null;
+  return t.slice(0, 60); // 与内核 WOLF_CHAT_MAX 同口径截断
+}
+
+/** §5.1 宽容解析：先判 save / skip，再取第一个 1–9 数字；失败返回 null（回退）。
+ *  狼阶段不走此函数（两行格式，见 parseWolfReply）。 */
 export function parseAIReply(phase, text) {
   if (typeof text !== 'string') return null;
   if (phase === 'speak' || phase === 'lastwords' || phase === 'pk_speak') {
@@ -506,8 +556,6 @@ export function parseAIReply(phase, text) {
   if (!m) return null;
   const n = Number(m[0]);
   switch (phase) {
-    case 'wolf':
-      return { type: 'wolf_target', target: n };
     case 'seer':
       return { type: 'seer_check', target: n };
     case 'witch':

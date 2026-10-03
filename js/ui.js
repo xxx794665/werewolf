@@ -363,8 +363,59 @@ function renderAction(snap, actions) {
       break;
     }
     case "wolf": {
-      panel.append(el("p", "action-title", "你是狼队长：选定今晚的刀口（不可空刀）"));
-      targetPicker(panel, snap, alive, (s) => `定刀 ${seatLabel(snap, s)}`, actions.wolfTarget);
+      panel.append(el("p", "action-title", "狼队密聊（只有狼人可见）· 投票定刀"));
+      /* §4.1.1 密聊记录：狼座私有快照字段，轮询实时刷新 */
+      const chat = you && Array.isArray(you.wolfChat) ? you.wolfChat : [];
+      const chatBox = el("ul", "wolf-chat");
+      if (chat.length === 0) chatBox.append(el("li", "wolf-chat-line wolf-chat-empty", "今晚队友还没说话，开个头？"));
+      for (const m of chat) {
+        chatBox.append(el("li", "wolf-chat-line" + (m.seat === meSeat ? " me" : ""), `${m.seat} 号：${m.text}`));
+      }
+      panel.append(chatBox);
+      /* 密聊输入：单步提交（同白天发言，不在不可逆清单） */
+      const row = el("div", "chat-input-row");
+      const input = el("input", "chat-input");
+      input.maxLength = 60;
+      input.placeholder = "对队友说点什么（≤60 字）…";
+      const send = el("button", "btn", "发送");
+      send.type = "button";
+      const sendChat = () => {
+        const text = input.value.trim();
+        if (!text) return toast("密聊内容不能为空");
+        input.value = "";
+        actions.wolfChat(text);
+      };
+      send.addEventListener("click", sendChat);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") sendChat();
+      });
+      row.append(input, send);
+      panel.append(row);
+      /* 投票定刀：下拉框选当前存活目标（全员一票不可改，平票狼队长裁定；
+       * 允许投队友 / 自己——自刀与弃车是合法战术，§8.4 同口径） */
+      const votes = (you && you.wolfVotes) || {};
+      if (votes[meSeat] !== undefined) {
+        const capNote = you.captain === meSeat ? "平票时由你一锤定音。" : "";
+        panel.append(el("p", "hint", `你已投 ${seatLabel(snap, votes[meSeat])}（不可更改）。等待其他狼人投票…${capNote}`));
+      } else {
+        const wrap = el("div", "wolf-vote-row");
+        const sel = el("select", "vote-select");
+        sel.setAttribute("aria-label", "选择刀口目标");
+        for (const s of alive) {
+          const o = el("option", null, seatLabel(snap, s) + (s === meSeat ? "（自己）" : ""));
+          o.value = String(s);
+          sel.append(o);
+        }
+        const cast = el("button", "btn btn-primary", "投票定刀");
+        cast.type = "button";
+        cast.addEventListener("click", () => {
+          const t = Number(sel.value);
+          showConfirm(`投票刀 ${seatLabel(snap, t)} —— 确认后不可更改`, () => actions.wolfTarget(t));
+        });
+        wrap.append(sel, cast);
+        panel.append(wrap);
+        panel.append(el("p", "hint", "全员投票定刀：最高票出局，平票由狼队长裁定。"));
+      }
       break;
     }
     case "seer": {

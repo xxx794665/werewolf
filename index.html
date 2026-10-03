@@ -140,6 +140,9 @@
       </label>
       <!-- js/ai.js：存 localStorage（uid / 昵称同处）；请求一律经 Worker /api/ai-proxy 转发 -->
       <button class="btn btn-primary" id="cfg-save" type="button">保存</button>
+      <!-- js/app.js：用输入框当前值发一条最小请求探活（不保存也能测），走与游戏相同的代理链路 -->
+      <button class="btn" id="cfg-test" type="button">测试连接</button>
+      <p class="hint" id="cfg-test-result" hidden></p>
       <p class="hint">Key 只存浏览器 localStorage、按请求透传，服务端不落盘。同 IP 每日中转上限 5000 次。</p>
       <button class="btn btn-ghost" type="button" data-goto="screen-menu">返回</button>
     </section>

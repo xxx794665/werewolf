@@ -27,7 +27,7 @@ const json = (data, status = 200) =>
   });
 
 const ROOM_ACTIONS = [
-  'join', 'ready', 'start', 'speak', 'vote', 'wolf-target',
+  'join', 'ready', 'start', 'speak', 'vote', 'wolf-chat', 'wolf-target',
   'seer-check', 'witch-move', 'hunter-shoot', 'heartbeat',
 ];
 
@@ -173,14 +173,37 @@ export class Room {
         if (guard == null) text = await this.fetchAI(req.url, req.body, body.key);
       }
       const phase = logic.phaseOf(fresh.game);
-      const parsed = text != null ? logic.parseAIReply(phase, text) : null;
+      const wolf = phase === 'wolf' && text != null ? logic.parseWolfReply(text) : null; // §4.1.1 两行格式
+      const parsed = text != null && phase !== 'wolf' ? logic.parseAIReply(phase, text) : null;
 
       /* 提交（AI 结果或回退）都基于提交瞬间的最新状态；再撞 STALE 就回错 */
       let out = null;
       let via = null;
-      const latest = await this.load();
+      let latest = await this.load();
       if (game.pendingSeat(latest.game) === seat) {
-        if (parsed) {
+        if (wolf) {
+          // 狼阶段一次调用两段提交：先密聊（可选），后投票（缺票走回退随机）
+          if (wolf.chat) {
+            const c = logic.applyGameAction(latest, { type: 'wolf_chat', seat, text: wolf.chat }, Date.now());
+            if (!c.error) {
+              out = c;
+              latest = c.room;
+            }
+          }
+          if (wolf.target != null) {
+            const v = logic.applyGameAction(latest, { type: 'wolf_target', seat, target: wolf.target }, Date.now());
+            if (!v.error) {
+              out = v;
+              via = 'ai';
+            }
+          } else if (out != null) {
+            const fb = logic.applyFallbackFor(latest, seat, Date.now()); // 只聊了天没投票 → 随机票兜底
+            if (!fb.error) {
+              out = fb;
+              via = 'fallback';
+            }
+          }
+        } else if (parsed) {
           const attempt = logic.applyGameAction(latest, { ...parsed, seat }, Date.now());
           if (!attempt.error) {
             out = attempt;

@@ -4,8 +4,9 @@
  * 路由表（features.md §9）：
  *   POST /api/room/new          建房返回 6 位房号（同 IP 每日 100 房）
  *   POST /api/room/:code/:act   房内动作转发 DO（join / ready / start / speak /
- *                               vote / wolf-target / seer-check / witch-move /
- *                               hunter-shoot / heartbeat / ai_view[owner 专属] /
+ *                               vote / wolf-chat / wolf-target / seer-check /
+ *                               witch-move / hunter-shoot / heartbeat /
+ *                               ai_view[owner 专属] /
  *                               drive_ai[owner 专属，服务端发起 AI 行动]）
  *   GET  /api/room/:code/state  轮询快照（uid + rev 查询参数；无变化回 unchanged）
  *   POST /api/ai-proxy          AI 中转（请求侧在此，出站执行在 ai-proxy.js，
@@ -28,7 +29,7 @@ export { resetRoomLimiterForTests } from './rate-limit.js';
    随机源用 crypto.getRandomValues（母本同款，非 Math.random）。 */
 const ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const ROOM_ACT =
-  'join|ready|start|speak|vote|wolf-target|seer-check|witch-move|hunter-shoot|heartbeat|ai_view|drive_ai';
+  'join|ready|start|speak|vote|wolf-chat|wolf-target|seer-check|witch-move|hunter-shoot|heartbeat|ai_view|drive_ai';
 
 /* CORS：只回放 ALLOWED_ORIGINS 命中的 Origin；无 Origin（同源 / curl）取白名单首项 */
 function corsHeaders(env, origin) {

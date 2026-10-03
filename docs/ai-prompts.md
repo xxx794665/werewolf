@@ -56,6 +56,11 @@ ADR-0003（roleCard 来源 = 单机本地内核状态 / 联机 DO 自持状态�
   "role": "wolf",               // 必填。wolf / villager / seer / witch / hunter
 
   "wolves": [2, 5, 6],          // 仅 wolf：全体狼座位号（含本人、含已死队友）
+  "wolfChat": [                 // 仅 wolf 且仅 wolf 阶段（§4.1.1）：狼队密聊记录（天亮即清）
+    { "seat": 2, "text": "刀 3 号，白天我跳预言家" }
+  ],
+  "wolfVotes": { "2": 3 },      // 仅 wolf 且仅 wolf 阶段：已投狼票（座位号 → 目标）
+  "captain": 2,                 // 仅 wolf 且仅 wolf 阶段：狼队长座位号（平票裁定者）
   "checks": [                   // 仅 seer：本人验人历史（可省略 = 还没验过）
     { "night": 1, "seat": 4, "result": "good" },   // result: "good" | "wolf"
     { "night": 2, "seat": 7, "result": "wolf" }
@@ -118,15 +123,17 @@ buildMessages(history, roleCard, phase) →
 ```
 
 - **phase 枚举**（`PHASES`，9 个）：`speak`（白天发言）/ `lastwords`（遗言）/
-  `pk_speak`（PK 自辩）/ `vote` / `pk_vote` / `wolf`（定刀）/ `seer`（验人）/
+  `pk_speak`（PK 自辩）/ `vote` / `pk_vote` / `wolf`（狼队密聊 + 投票定刀，§4.1.1）/ `seer`（验人）/
   `witch`（用药）/ `hunter`（开枪）。前三个是发言类，其余是行动类。
 - **周期推导**：夜阶段（wolf/seer/witch）= 「第 `maxDay+1` 夜」；其余 = 「第 `maxDay` 天」。
   空历史（第一夜行动）= 第 1 夜，聊天记录渲染为「（游戏刚开始，还没有任何公开事件。）」。
 - **存活推导**：`1–9 − (deaths ∪ exile ∪ hunter.target ∪ digest.dead)`。
 - **私有信息归属**：`wolves` / `checks` / 药状态进 system 消息（本局恒定的事实）；
-  `knifeTarget` 只进 witch 阶段的 user 消息（当晚瞬态情报）。
-- **每座位口吻**：`PERSONAS[(seat-1) % 6]`，确定性、无外部输入——让 8 个 AI 声音互不相同，
-  降低「多座位一个腔调」的违和与复读感。
+  `knifeTarget` 只进 witch 阶段的 user 消息（当晚瞬态情报）；`wolfChat` / `wolfVotes` /
+  `captain` 只进 wolf 阶段的 user 消息（狼座合法私有视角，天亮即清）。
+- **每座位人格**：`PERSONAS[(seat-1) % 8]`，8 款言行风格人格（ADR-0007），确定性、
+  无外部输入——让 8 个 AI 声线与玩法风格互不相同（有人盘逻辑、有人乐子人、有人暴民），
+  降低「多座位一个腔调」的违和感。人格只含风格与心态，绝不含身份信息（上下文铁律不受影响）。
 - **错误处理**：输入不合法一律 `throw Error("prompts: …")`。调用方捕获后按
   `features.md` §8.4 走确定性回退（不打断游戏）。本模块绝不猜测、绝不静默降级。
 
@@ -135,7 +142,7 @@ buildMessages(history, roleCard, phase) →
 | phase | 期望输出 | 解析（见 §5.1） |
 |---|---|---|
 | speak / lastwords / pk_speak | 发言正文，100–200 字（硬上限 200，`features.md` §5.8） | 原文即正文；超 200 字由驱动方截断后提交 |
-| wolf | 刀口座位号（不可 skip，§5.10 不可空刀） | 提取 1–9 数字 |
+| wolf | 两行：第一行狼队密聊发言（≤50 字，「过」= 无话）；第二行刀口座位号（不可 skip，§5.10 不可空刀） | `parseWolfReply`：首行剥引号后为密聊（「过」→ null），其余取首个 1–9 数字；缺票走回退随机投、密聊保留 |
 | seer | 验人座位号（不可 skip / 不验自己 / 不验已死） | 提取 1–9 数字 |
 | witch | `save`（救当夜刀口）/ 座位号（毒）/ `skip` | 先判 save / skip，再提取数字 |
 | hunter | 座位号（带走）或 `skip`（放弃，§5.6） | 同上 |
@@ -294,7 +301,9 @@ DO 侧流程：
    放 `shared/` 而非 `js/` 的原因）→ §5.0 请求体；
 4. url-guard 校验上游 URL → 出站 fetch（30s 超时、失败重试 1 次）→ §5.1 解析 →
    结果直接写入状态机（语义等价于上表的 act() 动作，幂等规则相同）→ 失败走
-   `shared/game.js` 确定性回退。
+   `shared/game.js` 确定性回退。**狼阶段例外（§4.1.1，ADR-0007）**：`parseWolfReply`
+   解析出「密聊 + 投票」两段，一次 drive_ai 调用两段提交（先 `wolf-chat` 后
+   `wolf-target`）；解析无票时密聊保留、投票走确定性回退随机投。
 
 与 5.3.1 的差异表：
 

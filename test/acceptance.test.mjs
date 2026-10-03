@@ -81,9 +81,29 @@ function assertNoLeak(req) {
   // roleCard 角色白名单 + 私有信息与真实内核状态一致（合法私有信息必须是真的）
   const keys = Object.keys(card).sort();
   if (card.role === 'wolf') {
-    assert.deepEqual(keys, ['role', 'seat', 'wolves'], `${label}: 狼身份卡字段越界`);
+    // §4.1.1：狼阶段额外带密聊 / 投票 / 队长（均属狼座合法私有视角）
+    assert.ok(
+      keys.every((k) => ['role', 'seat', 'wolves', 'wolfChat', 'wolfVotes', 'captain'].includes(k)),
+      `${label}: 狼身份卡字段越界：${keys.join(',')}`
+    );
     const actual = state.players.filter((p) => p && p.role === 'werewolf').map((p) => p.seat);
     assert.deepEqual(card.wolves, actual, `${label}: 狼队友名单必须等于真实狼座位`);
+    if ('wolfChat' in card) {
+      assert.equal(phase, 'wolf', `${label}: 密聊只允许出现在狼阶段身份卡`);
+      assert.deepEqual(
+        card.wolfChat,
+        (state.night && state.night.wolfChat) || [],
+        `${label}: 密聊记录必须等于真实频道内容`
+      );
+      assert.deepEqual(
+        card.wolfVotes,
+        (state.night && state.night.wolfVotes) || {},
+        `${label}: 狼票必须等于真实投票`
+      );
+      assert.equal(card.captain, game.wolfCaptain(state), `${label}: 队长必须是内核推导值`);
+    } else {
+      assert.notEqual(phase, 'wolf', `${label}: 狼阶段身份卡必须携带密聊频道`);
+    }
   } else if (card.role === 'seer') {
     assert.deepEqual(keys, ['checks', 'role', 'seat'], `${label}: 预言家身份卡字段越界`);
     for (const c of card.checks) {
@@ -107,6 +127,7 @@ function assertNoLeak(req) {
   // 跨角色私密信息探针：他人可见内容里绝不出现别的角色的私有渲染
   if (card.role !== 'wolf') {
     assert.ok(!combined.includes('全体狼座位') && !combined.includes('存活队友'), `${label}: 非狼不得见狼队名单`);
+    assert.ok(!combined.includes('狼队密聊记录'), `${label}: 非狼不得见狼队密聊（§4.1.1）`);
   }
   if (card.role !== 'seer') assert.ok(!combined.includes('查验记录'), `${label}: 非预言家不得见验史`);
   if (card.role !== 'witch') assert.ok(!combined.includes('你的解药'), `${label}: 非女巫不得见用药状态`);
@@ -180,7 +201,7 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
         case 'pk_speak':
           return '我确实是好人，台上另一位更值得出，大家想清楚再投。';
         case 'wolf':
-          return String(alive(st)[0]);
+          return `今晚刀 ${alive(st)[0]} 号，白天我来带节奏，你们口型跟我对齐。\n${alive(st)[0]}`;
         case 'seer':
           return String(others[0]);
         case 'witch':
@@ -198,12 +219,19 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
       }
     };
 
-    /* 真人座位（1 号）由测试脚本代操作，口径与桩 AI 相同 */
+    /* 真人座位（1 号）由测试脚本代操作，口径与桩 AI 相同（狼阶段两行：密聊 + 投票） */
     const humanAction = (st, seat, phase) => {
       const text = stubReply(st, seat, phase);
+      if (phase === 'wolf') {
+        const w = ai.parseWolfReply(text);
+        return {
+          chat: w.chat,
+          action: w.target != null ? { type: 'wolf_target', target: w.target, seat } : null,
+        };
+      }
       const parsed = ai.parseReply(phase, text);
       assert.ok(parsed, `真人动作解析失败：${phase} / ${text}`);
-      return { ...parsed, seat };
+      return { chat: null, action: { ...parsed, seat } };
     };
 
     let guard = 0;
@@ -214,9 +242,10 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
       assert.ok(phase, `待行动时必须有 AI 任务阶段（${s.phase}:${s.subPhase}）`);
       phasesSeen.add(phase);
 
+      let chat = null;
       let action = null;
       if (seat === 1) {
-        action = humanAction(s, seat, phase);
+        ({ chat, action } = humanAction(s, seat, phase));
       } else {
         /* 生产同款链路（ai.decideFor）：roleCardOf → windowHistory → buildMessages →
          * /api/ai-proxy（被桩截获）→ parseReply；捕获现场供铁律断言。 */
@@ -225,7 +254,7 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
         const stateAtCall = s;
         const capturedBefore = captured.length;
         nextReply = stubReply(s, seat, phase);
-        const { action: decided } = await ai.decideFor(s, log, seat);
+        const d = await ai.decideFor(s, log, seat);
         /* 必须恰好发出一次请求，且走 Worker 代理而非直连上游 */
         assert.equal(captured.length, capturedBefore + 1, `seat=${seat} phase=${phase} 应发出一次 AI 请求`);
         const call = captured[captured.length - 1];
@@ -244,9 +273,16 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
           history: historyAtCall,
           state: stateAtCall,
         });
-        action = decided ? { ...decided, seat } : null;
+        chat = d.chat;
+        action = d.action ? { ...d.action, seat } : null;
       }
 
+      if (chat) {
+        /* §4.1.1 狼队密聊：先入频道（不产生公开事件），再投票 */
+        const c = game.advance(s, { type: 'wolf_chat', seat, text: chat });
+        assert.equal(c.error, null, `狼队密聊提交失败：${c.error}`);
+        s = c.state;
+      }
       let r = action ? game.advance(s, action) : { error: 'ai-failed' };
       if (r.error) {
         const fb = game.applyFallback(s, seat); // §8.4 确定性回退，不打断游戏

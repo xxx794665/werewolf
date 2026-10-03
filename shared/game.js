@@ -26,7 +26,8 @@
  *   players[9]: { seat, nick, uid, isAI, ready, role, alive, death? }
  *     death = { day, cause: 'blade'|'poison'|'shot'|'exile' }（复盘用）
  *   rng: mulberry32 状态（发牌洗牌与确定性回退共用，测试可复现）
- *   night: 当夜瞬时 { blade, saved, poison }，天亮结算后清空
+ *   night: 当夜瞬时 { blade, saved, poison, wolfChat, wolfVotes }，天亮结算后清空
+ *     （wolfChat = 狼队密聊记录、wolfVotes = 狼队定刀投票，仅狼座快照可见，§4.1.5）
  *   seerChecks / witch / queue / votes / pkCandidates / pendingHunter /
  *   pendingExile / winner / reason
  * ============================================================ */
@@ -35,6 +36,8 @@ export const SEAT_COUNT = 9; // §3：房间人数固定 9，不可设置
 export const MIN_HUMANS = 3; // §7.4：最小开桌真人 3 人
 export const BOARD = { werewolf: 3, villager: 3, seer: 1, witch: 1, hunter: 1 }; // §3 唯一板子
 const SPEECH_MAX = 200; // §5.8：发言 / 遗言 ≤200 字（内核同 UI 双重限制）
+export const WOLF_CHAT_MAX = 60; // §4.1.1：狼队密聊每条 ≤60 字
+export const WOLF_CHAT_TURNS = 5; // §4.1.1：每晚每狼至多 5 条（防刷屏防状态膨胀）
 
 /* ---------- 内部工具 ---------- */
 
@@ -107,7 +110,7 @@ export function createInitialState() {
 
 /* ---------- 导出的规则纯函数 ---------- */
 
-/** §5.1 狼队长：存活狼真人优先（多人取座位号最小），否则座位号最小 AI 狼。 */
+/** §5.1 狼队长（定刀平票时的一锤定音者）：存活狼真人优先（多人取座位号最小），否则座位号最小 AI 狼。 */
 export function wolfCaptain(state) {
   const wolves = state.players.filter((p) => p && p.alive && p.role === 'werewolf');
   if (wolves.length === 0) return null;
@@ -156,8 +159,15 @@ export function generateAISeats(players) {
 /** 当前待行动座位（UI 提示「轮到你」与 DO 150s 超时兜底共用；投票阶段返回首个未投者）。 */
 export function pendingSeat(state) {
   switch (`${state.phase}:${state.subPhase}`) {
-    case 'night:wolf':
-      return wolfCaptain(state);
+    case 'night:wolf': {
+      // 狼队全员投票制：待行动 = 第一个未投票的存活狼（超时与 AI 驱动按此逐个推进；
+      // 全部投完的瞬间 hWolfTarget 已推进到下一子阶段，不会停留在此）
+      const votes = wolfVotesOf(state);
+      const w = state.players.find(
+        (p) => p && p.alive && p.role === 'werewolf' && votes[p.seat] === undefined
+      );
+      return w ? w.seat : null;
+    }
     case 'night:seer': {
       const p = findAliveRole(state, 'seer');
       return p ? p.seat : null;
@@ -198,6 +208,7 @@ const HANDLERS = {
   join: hJoin,
   ready: hReady,
   start: hStart,
+  wolf_chat: hWolfChat,
   wolf_target: hWolfTarget,
   seer_check: hSeerCheck,
   witch_move: hWitchMove,
@@ -255,7 +266,7 @@ function hStart(state, a) {
   s.phase = 'night';
   s.day = 1;
   s.subPhase = 'wolf';
-  s.night = { blade: null, saved: false, poison: null };
+  s.night = { blade: null, saved: false, poison: null, wolfChat: [], wolfVotes: {} };
   s.witch = { antidote: 1, poison: 1 };
   s.seerChecks = [];
   s.queue = [];
@@ -268,17 +279,74 @@ function hStart(state, a) {
   ]);
 }
 
-/* ---------- 夜晚（§4.1：wolf → seer → witch → 结算） ---------- */
+/* ---------- 夜晚（§4.1：狼队密聊+投票定刀 → seer → witch → 结算） ---------- */
 
+/**
+ * §4.1.1 狼队密聊：仅存活狼人可见的夜间频道（night.wolfChat，天亮即清）。
+ * 不产生公开事件（§4.1.5）；每狼每晚至多 WOLF_CHAT_TURNS 条、每条 ≤WOLF_CHAT_MAX 字。
+ */
+function hWolfChat(state, a) {
+  const s = clone(state);
+  if (s.phase !== 'night' || s.subPhase !== 'wolf') return fail(state, '当前不是狼队密聊时间');
+  // 部署过渡兜底：旧版持久化房间的 night 没有这两个字段，推进前补齐
+  if (!Array.isArray(s.night.wolfChat)) s.night.wolfChat = [];
+  if (!s.night.wolfVotes || typeof s.night.wolfVotes !== 'object') s.night.wolfVotes = {};
+  const me = isAlive(s, a.seat);
+  if (!me || me.role !== 'werewolf') return fail(state, '只有存活狼人可以参与密聊');
+  const text = typeof a.text === 'string' ? a.text.trim() : '';
+  if (!text) return fail(state, '密聊内容不能为空');
+  if (text.length > WOLF_CHAT_MAX) return fail(state, `密聊每条不超过 ${WOLF_CHAT_MAX} 字`);
+  if (s.night.wolfChat.filter((m) => m.seat === a.seat).length >= WOLF_CHAT_TURNS) {
+    return fail(state, `今晚你的密聊条数已用完（${WOLF_CHAT_TURNS} 条）`);
+  }
+  s.night.wolfChat.push({ seat: a.seat, text });
+  return ok(s);
+}
+
+/**
+ * §4.1.1 投票定刀：每个存活狼人一票（不可改票），目标必须是存活玩家
+ * （允许投队友 / 自己——自刀与弃车是合法战术，§8.4 同口径）。
+ * 全部存活狼投完的瞬间结算：最高票出局，平票由狼队长一锤定音。
+ */
 function hWolfTarget(state, a) {
   const s = clone(state);
   if (s.phase !== 'night' || s.subPhase !== 'wolf') return fail(state, '当前不是狼人定刀阶段');
-  const cap = wolfCaptain(s);
-  if (a.seat !== cap) return fail(state, '只有狼队长可以定刀'); // §5.1 其余狼只看结果
+  // 部署过渡兜底：旧版持久化房间的 night 没有投票表，推进前补齐
+  if (!s.night.wolfVotes || typeof s.night.wolfVotes !== 'object') s.night.wolfVotes = {};
+  const me = isAlive(s, a.seat);
+  if (!me || me.role !== 'werewolf') return fail(state, '只有存活狼人可以投票定刀');
+  if (s.night.wolfVotes[a.seat] !== undefined) return fail(state, '你已投过票，不可更改');
   const t = isAlive(s, a.target);
   if (!t) return fail(state, '刀口必须是存活玩家（狼不可空刀，§5.10）');
-  s.night.blade = t.seat;
+  s.night.wolfVotes[a.seat] = t.seat;
+  const unvoted = s.players.some(
+    (p) => p && p.alive && p.role === 'werewolf' && s.night.wolfVotes[p.seat] === undefined
+  );
+  if (unvoted) return ok(s); // 还有队友未投票，继续等（密聊仍开放）
+  return resolveWolfVote(s);
+}
+
+/** 狼票结算：最高票出局；平票时狼队长的票若在平票集合中则从其票，否则取最小座位号。 */
+function resolveWolfVote(s) {
+  const counts = new Map();
+  for (const t of Object.values(s.night.wolfVotes)) counts.set(t, (counts.get(t) || 0) + 1);
+  let max = 0;
+  for (const n of counts.values()) if (n > max) max = n;
+  const top = [...counts.keys()].filter((seat) => counts.get(seat) === max).sort((x, y) => x - y);
+  let blade = top[0];
+  if (top.length > 1) {
+    const capVote = s.night.wolfVotes[wolfCaptain(s)];
+    if (capVote != null && top.includes(capVote)) blade = capVote;
+  }
+  s.night.blade = blade;
   return enterSeer(s);
+}
+
+/** 待行动座位未投票时的狼票兜底读取（pendingSeat / 快照共用）。 */
+function wolfVotesOf(state) {
+  return state.night && state.night.wolfVotes && typeof state.night.wolfVotes === 'object'
+    ? state.night.wolfVotes
+    : {};
 }
 
 function enterSeer(s) {
@@ -558,7 +626,7 @@ function nextNight(s, events) {
   s.day += 1;
   s.phase = 'night';
   s.subPhase = 'wolf';
-  s.night = { blade: null, saved: false, poison: null };
+  s.night = { blade: null, saved: false, poison: null, wolfChat: [], wolfVotes: {} };
   s.queue = [];
   s.votes = null;
   s.pkCandidates = null;

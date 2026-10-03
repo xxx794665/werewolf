@@ -151,6 +151,23 @@ function driveSeat(room, seat, extra) {
   return { uid: p.uid, ...extra };
 }
 
+/** §4.1.1 狼队全员投票定刀：所有存活未投票的狼依次投 target，返回最终房间。 */
+function wolfKnifeAll(room, target, startNow = T0) {
+  let cur = room;
+  let n = 0;
+  for (const p of cur.game.players.filter((x) => x && x.alive && x.role === 'werewolf')) {
+    if (cur.game.night && cur.game.night.wolfVotes[p.seat] !== undefined) continue; // 已投过（回退等）
+    const out = logic.applyAction(cur, 'wolf-target', driveSeat(cur, p.seat, { target }), {
+      now: startNow + n * 10,
+      seed: 42,
+    });
+    assert.ok(!out.error, `wolf-target(${p.seat}) 不应失败：${out.error}`);
+    cur = out.room;
+    n += 1;
+  }
+  return cur;
+}
+
 test('建房：房主入座 1 号，大厅事件与 rev 起步正确', () => {
   const bad = logic.createRoom('X', { nick: '', uid: 'u1' }, T0);
   assert.ok(bad.error, '空昵称应被拒');
@@ -209,43 +226,64 @@ test('补位开桌：3 真人 start → 原子补 6 AI 到 9 并进 night_1；�
   assert.equal(logic.applyAction(notOwner, 'start', { uid: 'u1' }, { now: T0, seed: 1 }).error, '真人不足 3 人，无法开桌');
 });
 
-test('夜视角冻结（§4.1.6 / ADR-0002）：狼定刀后非行动非知情座位 rev 不动，知情者齐跳', () => {
+test('夜视角冻结（§4.1.6 / §4.1.1 / ADR-0002）：密聊只有狼座可见，非狼座位 rev 冻结；全员投完刀口落定', () => {
   const { room, act } = newGame();
-  const g = room.game;
-  const cap = game.wolfCaptain(g);
+  const cap = game.wolfCaptain(room.game);
   const villager = seatsOfRole(room, 'villager').find((s) => s !== cap);
   const wolves = seatsOfRole(room, 'werewolf');
-  const teammate = wolves.find((s) => s !== cap);
   const seer = seatOfRole(room, 'seer');
   const victim = seatsOfRole(room, 'villager')[1];
 
   const before = snap(room, villager);
   const revV = room.revs[villager];
-  const after = act('wolf-target', driveSeat(room, cap, { target: victim }), T0 + 200).room;
+  const after = act('wolf-chat', driveSeat(room, cap, { text: '白天我带节奏，你们补刀口' }), T0 + 150).room;
 
-  assert.equal(snap(after, villager), before, '普通村民夜里快照冻结');
+  assert.equal(snap(after, villager), before, '普通村民夜里快照冻结（密聊不可见）');
   assert.equal(after.revs[villager], revV, '普通村民 rev 不变');
-  assert.equal(after.revs[cap], room.revs[cap] + 1, '狼队长自己视角更新（action 消失）');
-  if (teammate) assert.equal(after.revs[teammate], room.revs[teammate] + 1, '存活狼队友看到刀口 → rev+1');
-  assert.equal(after.revs[seer], room.revs[seer] + 1, '预言家轮到 → action 出现 → rev+1');
-  // 夜里快照不露子阶段（所有非行动者一致只看到 night）
-  const s = logic.snapshotFor(after, villager);
-  assert.equal(s.phase, 'night');
-  assert.equal('subPhase' in s, false, '夜里不露子阶段');
-  assert.equal(s.action, undefined);
+  // §4.1.1：密聊只有狼座可见 → 全部存活狼 rev+1，非狼全冻结
+  assert.equal(after.revs[cap], room.revs[cap] + 1, '发言狼自己视角更新');
+  for (const w of wolves) {
+    if (w !== cap) assert.equal(after.revs[w], room.revs[w] + 1, `狼队友 ${w} 看到密聊 → rev+1`);
+  }
+  assert.equal(after.revs[seer], room.revs[seer], '狼阶段未结束，预言家仍冻结');
+  const wSnap = logic.snapshotFor(after, cap);
+  assert.equal(wSnap.action.kind, 'wolf', '狼阶段行动面板对全员狼开放');
+  assert.deepEqual(wSnap.you.wolfChat, [{ seat: cap, text: '白天我带节奏，你们补刀口' }], '密聊进狼座私有视角');
+  assert.deepEqual(wSnap.you.wolfVotes, {}, '投票暂空');
+  const vSnap = logic.snapshotFor(after, villager);
+  assert.equal(vSnap.you.wolfChat, undefined, '非狼座位绝不带密聊字段');
+  assert.equal(vSnap.you.wolfVotes, undefined);
+  assert.equal(vSnap.action, undefined);
+  // 夜里快照不露子阶段（非行动非知情座位只看到 night）
+  assert.equal('subPhase' in vSnap, false, '夜里不露子阶段');
+
+  // 全员投票 → 刀口落定 → 预言家轮到
+  const done = wolfKnifeAll(after, victim, T0 + 200);
+  assert.equal(done.game.night.blade, victim, '全员一致 → 多数决定刀');
+  assert.equal(done.game.subPhase, 'seer', '全狼投完推进到预言家');
+  assert.equal(done.revs[seer], after.revs[seer] + 1, '预言家轮到 → rev+1');
+  assert.equal(logic.snapshotFor(done, cap).you.blade, victim, '狼座知晓刀口');
+  assert.equal(
+    logic.snapshotFor(done, wolves.find((w) => w !== cap)).you.blade,
+    victim,
+    '存活狼队友同样知晓刀口'
+  );
 });
 
 test('天亮齐跳：夜结算公布死者后全员 rev+1，白天子阶段与 pending 公开', () => {
-  const { room, act } = newGame();
-  const g = room.game;
-  const cap = game.wolfCaptain(g);
+  const { room } = newGame();
   const victim = seatsOfRole(room, 'villager')[1];
   const seer = seatOfRole(room, 'seer');
   const witch = seatOfRole(room, 'witch');
   const revs0 = { ...room.revs };
-  act('wolf-target', driveSeat(room, cap, { target: victim }), T0 + 200);
-  let cur = act('seer-check', driveSeat(room, seer, { target: seatsOfRole(room, 'villager')[0] }), T0 + 210).room;
-  cur = act('witch-move', driveSeat(cur, witch, { move: 'skip' }), T0 + 220).room;
+  let cur = wolfKnifeAll(room, victim, T0 + 200);
+  const step = (a, b, now) => {
+    const out = logic.applyAction(cur, a, b, { now, seed: 42 });
+    assert.ok(!out.error, `${a} 不应失败：${out.error}`);
+    cur = out.room;
+  };
+  step('seer-check', driveSeat(cur, seer, { target: seatsOfRole(cur, 'villager')[0] }), T0 + 210);
+  step('witch-move', driveSeat(cur, witch, { move: 'skip' }), T0 + 220);
 
   assert.equal(cur.game.phase, 'day');
   assert.equal(cur.game.subPhase, 'lastwords', '首夜有死者 → 遗言阶段');
@@ -262,18 +300,27 @@ test('天亮齐跳：夜结算公布死者后全员 rev+1，白天子阶段与 p
 test('越权与非法动作被拒：非本人座位 / 非房主代打 / AI 座位不认 uid 直投', () => {
   const { room } = newGame();
   const cap = game.wolfCaptain(room.game);
-  const other = room.game.players.find((p) => p.alive && p.seat !== cap).seat;
-  assert.ok(logic.applyAction(room, 'wolf-target', driveSeat(room, other, { target: 1 }), { now: T0 }).error);
+  const villager = seatsOfRole(room, 'villager')[0];
+  assert.ok(
+    logic.applyAction(room, 'wolf-target', driveSeat(room, villager, { target: 1 }), { now: T0 }).error,
+    '非狼不可投票定刀'
+  );
+  assert.ok(
+    logic.applyAction(room, 'wolf-chat', driveSeat(room, villager, { text: '混进来' }), { now: T0 }).error,
+    '非狼不可参与密聊'
+  );
   // 非房主带 seat 代打 → 拒
   const victim = seatsOfRole(room, 'villager')[1];
   assert.ok(
     logic.applyAction(room, 'wolf-target', { uid: 'u2', seat: cap, target: victim }, { now: T0 }).error,
     '非房主不可代打'
   );
-  // 房主带 seat 驱动 AI / 真人队长（driveSeat 合法身份）→ 成功
+  // 房主带 seat 驱动 AI / 真人狼（driveSeat 合法身份）→ 投票入账
   const out = logic.applyAction(room, 'wolf-target', driveSeat(room, cap, { target: victim }), { now: T0 + 5 });
-  assert.ok(!out.error, `合法队长提交应成功：${out.error}`);
-  assert.equal(out.room.game.night.blade, victim);
+  assert.ok(!out.error, `合法狼投票应成功：${out.error}`);
+  assert.equal(out.room.game.night.wolfVotes[cap], victim, '投票入账（全员投完才定刀）');
+  const done = wolfKnifeAll(out.room, victim, T0 + 10);
+  assert.equal(done.game.night.blade, victim, '全员投完 → 多数决定刀');
   // AI 座位的 uid 直投被拒（uid 自声明，AI 只能由房主经 seat 驱动）
   const aiSeat = room.game.players.find((p) => p && p.isAI).seat;
   const aiUid = room.game.players[aiSeat - 1].uid;
@@ -292,14 +339,17 @@ test('托管与行动超时（§7.7 / §5.11）：60s 无心跳转托管；150s 
   assert.ok(swept.room.revs[seat2] > room.revs[seat2], '托管标公开 → rev+1');
   assert.ok(logic.snapshotFor(swept.room, 1).players.find((p) => p.seat === seat2).hosted, '快照带托管标');
 
-  // 行动超时：deadline 过点 → 确定性回退推进（狼随机刀）
+  // 行动超时：deadline 过点 → 确定性回退推进（狼随机投一票，狼阶段继续）
   const pending = game.pendingSeat(room.game);
+  assert.ok(room.game.players[pending - 1].role === 'werewolf', '狼阶段待行动 = 未投票的狼');
   const late = structuredClone(room);
   late.deadline = { at: T0 + 100 - 1, seat: pending };
   const timed = logic.sweep(late, T0 + 100);
   assert.ok(timed.changed, '超时应触发回退');
-  assert.notEqual(timed.room.game.subPhase, 'wolf', '狼位回退后游戏推进');
-  assert.ok(timed.room.deadline.at > T0 + 100, '新待行动座位重新计时');
+  assert.ok(timed.room.game.night.wolfVotes[pending] != null, '超时狼被回退投出一票');
+  assert.equal(timed.room.game.subPhase, 'wolf', '单狼回退后狼阶段继续（其余狼待投票）');
+  assert.equal(timed.room.deadline.seat, game.pendingSeat(timed.room.game), '下一个未投票的狼重新计时');
+  assert.ok(timed.room.deadline.at > T0 + 100, '重新计时在未来');
   // 回退后该座位若为真人 → 同时转托管
   const actor = late.game.players[pending - 1];
   if (!actor.isAI) assert.ok(timed.room.hosted.includes(pending), '超时真人转托管');
@@ -362,17 +412,24 @@ test('心跳不抬 rev；托管座位重连（uid 心跳）即收回控制权；
 });
 
 test('AI 契约：buildAIRequest 组装 §5.0 请求体，女巫 roleCard 含当夜刀口', () => {
-  const { room, act } = newGame();
+  const { room } = newGame();
   const cap = game.wolfCaptain(room.game);
   const victim = seatsOfRole(room, 'villager')[1];
 
-  // 狼阶段（开局定刀前）：狼队长请求含狼队友私有信息
+  // 狼阶段（开局定刀前）：狼请求含身份设定、密聊任务与两行输出格式
   const wolfReq = logic.buildAIRequest(room, cap, { baseUrl: 'https://api.openai.com/v1', model: 'm' });
   assert.ok(!wolfReq.error, wolfReq.error);
   assert.ok(wolfReq.body.messages[0].content.includes('狼'), '狼 system 应含身份设定');
+  assert.ok(wolfReq.body.messages[1].content.includes('狼队密聊'), '狼 user 消息应含密聊任务（§4.1.1）');
+  assert.ok(wolfReq.body.messages[1].content.includes('两行'), '狼输出格式 = 密聊 + 投票两行');
 
-  let cur = act('wolf-target', driveSeat(room, cap, { target: victim }), T0 + 200).room;
-  cur = act('seer-check', driveSeat(cur, seatOfRole(cur, 'seer'), { target: seatsOfRole(cur, 'villager')[0] }), T0 + 210).room;
+  let cur = wolfKnifeAll(room, victim, T0 + 200);
+  const step = (a, b, now) => {
+    const out = logic.applyAction(cur, a, b, { now, seed: 42 });
+    assert.ok(!out.error, `${a} 不应失败：${out.error}`);
+    cur = out.room;
+  };
+  step('seer-check', driveSeat(cur, seatOfRole(cur, 'seer'), { target: seatsOfRole(cur, 'villager')[0] }), T0 + 210);
   const witchSeat = seatOfRole(cur, 'witch');
   assert.equal(cur.game.subPhase, 'witch', '推进到女巫阶段');
 
@@ -405,16 +462,99 @@ test('parseAIReply（§5.1 宽容解析）：save/skip 优先、取首个 1–9 
   assert.deepEqual(logic.parseAIReply('witch', '  save '), { type: 'witch_move', move: 'save' });
   assert.deepEqual(logic.parseAIReply('witch', 'skip。'), { type: 'witch_move', move: 'skip' });
   assert.deepEqual(logic.parseAIReply('witch', '毒 3 号'), { type: 'witch_move', move: 'poison', target: 3 });
-  assert.deepEqual(logic.parseAIReply('wolf', '7号'), { type: 'wolf_target', target: 7 });
-  assert.equal(logic.parseAIReply('wolf', 'skip'), null, '狼不可空刀 → 解析失败走回退');
   assert.deepEqual(logic.parseAIReply('hunter', 'skip'), { type: 'hunter_shoot', target: null });
   assert.deepEqual(logic.parseAIReply('hunter', '4'), { type: 'hunter_shoot', target: 4 });
   assert.deepEqual(logic.parseAIReply('vote', 'skip'), { type: 'vote', target: null });
   assert.deepEqual(logic.parseAIReply('pk_vote', '6号，我最可疑'), { type: 'vote', target: 6 });
   assert.equal(logic.parseAIReply('seer', '不知道'), null);
+  assert.equal(logic.parseAIReply('wolf', '7号'), null, '狼阶段改走 parseWolfReply 两行解析');
   const long = logic.parseAIReply('speak', '啊'.repeat(300));
   assert.equal(long.text.length, 200, '发言超 200 字截断');
   assert.equal(logic.parseAIReply('speak', '   '), null, '空发言 = 失败');
+});
+
+test('parseWolfReply（§4.1.1 两行格式）：首行密聊、余行投票；纯数字单行 = 只投票', () => {
+  assert.deepEqual(logic.parseWolfReply('白天我跳预言家\n4'), { chat: '白天我跳预言家', target: 4 });
+  assert.deepEqual(logic.parseWolfReply('过\n7号'), { chat: null, target: 7 }, '「过」= 无话可说');
+  assert.deepEqual(logic.parseWolfReply('5'), { chat: null, target: 5 }, '纯数字单行 = 只投票');
+  assert.deepEqual(
+    logic.parseWolfReply('先压 4 号，都别暴露'),
+    { chat: '先压 4 号，都别暴露', target: null },
+    '单行非纯数字 → 只解析出密聊，投票走回退'
+  );
+  assert.deepEqual(logic.parseWolfReply('「刀 3 号」\n投 3'), { chat: '刀 3 号', target: 3 }, '剥引号');
+  assert.deepEqual(logic.parseWolfReply(''), { chat: null, target: null });
+  assert.deepEqual(logic.parseWolfReply(null), { chat: null, target: null });
+});
+
+test('drive_ai 狼阶段（§4.1.1）：一次调用提交密聊 + 投票两段；上游失败回退只投票', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    class Store {
+      constructor() {
+        this.map = new Map();
+      }
+      async get(k) {
+        return this.map.get(k);
+      }
+      async put(k, v) {
+        this.map.set(k, v);
+      }
+      async delete(k) {
+        this.map.delete(k);
+      }
+      async setAlarm() {}
+      async deleteAlarm() {}
+    }
+    const boot = async () => {
+      const room = new Room({ storage: new Store() }, {});
+      const rpc = async (action, body, q = '') => {
+        const res = await room.fetch(
+          new Request(`https://do/?action=${action}${q}`, body ? { method: 'POST', body: JSON.stringify(body) } : undefined)
+        );
+        return res.json();
+      };
+      await rpc('new', { nick: '甲', uid: 'o1' }, '&code=WOLF01');
+      await rpc('join', { nick: '乙', uid: 'o2' });
+      await rpc('join', { nick: '丙', uid: 'o3' });
+      for (const u of ['o1', 'o2', 'o3']) await rpc('ready', { uid: u, ready: true });
+      await rpc('start', { uid: 'o1' });
+      return { room, rpc };
+    };
+    const CFG = { uid: 'o1', baseUrl: 'https://api.openai.com/v1', model: 'm', key: 'k' };
+    const { room, rpc } = await boot();
+    /* 白盒调牌：真人（1-3）全设平民，4/5/6 号 AI 设狼、7/8/9 设神职——
+     * 狼阶段待行动序列确定为 AI 座位（4 号先行），断言与发牌随机性解耦 */
+    const ROLES = ['villager', 'villager', 'villager', 'werewolf', 'werewolf', 'werewolf', 'seer', 'witch', 'hunter'];
+    room.room.game.players.forEach((p, i) => {
+      if (p) p.role = ROLES[i];
+    });
+
+    // 桩上游返回两行回复 → 一次 drive_ai 同时入账密聊与投票
+    globalThis.fetch = async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: '听我口型，白天都别露馅。\n4' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    const r1 = await rpc('drive_ai', CFG);
+    assert.equal(r1.ok, true, JSON.stringify(r1));
+    assert.equal(r1.via, 'ai');
+    const g1 = room.room.game;
+    assert.equal(g1.night.wolfChat.length, 1, '密聊入账');
+    assert.equal(g1.night.wolfVotes[g1.night.wolfChat[0].seat], 4, '同一次调用完成投票');
+
+    // 桩上游不可达 → 回退：只随机投票，不产生密聊
+    globalThis.fetch = async () => {
+      throw new Error('down');
+    };
+    const r2 = await rpc('drive_ai', CFG);
+    assert.equal(r2.ok, true, JSON.stringify(r2));
+    assert.equal(r2.via, 'fallback');
+    assert.equal(room.room.game.night.wolfChat.length, 1, '回退不产生密聊');
+    assert.equal(Object.keys(room.room.game.night.wolfVotes).length, 2, '回退投出一票');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('windowHistory（§5.4）：最近 2 个完整白天全量、更早压 digest、超限丢最旧', () => {

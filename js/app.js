@@ -68,7 +68,12 @@ function privateOf(g, seat) {
   const you = { seat, alive: !!meP.alive, role: meP.role };
   if (meP.role === "werewolf") {
     you.wolves = g.players.filter((p) => p && p.role === "werewolf").map((p) => p.seat);
-    if (g.phase === "night" && meP.alive && g.night && g.night.blade != null) you.blade = g.night.blade;
+    if (g.phase === "night" && meP.alive && g.night) {
+      if (g.night.blade != null) you.blade = g.night.blade;
+      you.wolfChat = g.night.wolfChat || []; // §4.1.1 狼队密聊与定刀投票（仅存活狼座）
+      you.wolfVotes = g.night.wolfVotes || {};
+      you.captain = game.wolfCaptain(g);
+    }
   }
   if (meP.role === "seer") {
     you.checks = (g.seerChecks || []).map((c) => ({ night: c.night, seat: c.target, result: c.isWolf ? "wolf" : "good" }));
@@ -117,6 +122,9 @@ function soloSnap() {
     s.reason = g.reason;
   }
   if (pending === 1 && ai.phaseOf(g)) s.action = { kind: ai.phaseOf(g) };
+  else if (meP.alive && meP.role === "werewolf" && g.phase === "night" && g.subPhase === "wolf") {
+    s.action = { kind: "wolf" }; // §4.1.1 狼队密聊+投票全员开放（不按 pending 排队）
+  }
   return s;
 }
 
@@ -151,6 +159,7 @@ function soloSubmit(action) {
 const soloActions = {
   speak: (text) => soloSubmit({ type: "speak", seat: 1, text }),
   vote: (target) => soloSubmit({ type: "vote", seat: 1, target }),
+  wolfChat: (text) => soloSubmit({ type: "wolf_chat", seat: 1, text }),
   wolfTarget: (target) => soloSubmit({ type: "wolf_target", seat: 1, target }),
   seerCheck: (target) => soloSubmit({ type: "seer_check", seat: 1, target }),
   witchSave: () => soloSubmit({ type: "witch_move", seat: 1, move: "save" }),
@@ -178,8 +187,16 @@ async function soloDrive() {
       const p = g.players[pending - 1];
       if (!p || !p.isAI) break; // 轮到玩家本人，等操作
       renderSolo();
-      const { action } = await ai.decideFor(g, solo.log, pending); // buildMessages → /api/ai-proxy → 解析
-      let r = action ? game.advance(solo.state, action) : { error: "ai-failed" };
+      const d = await ai.decideFor(g, solo.log, pending); // buildMessages → /api/ai-proxy → 解析
+      if (d.chat) {
+        // §4.1.1 狼队密聊：先入频道再投票（chat 不推进 pendingSeat，投票照常有效）
+        const c = game.advance(solo.state, { type: "wolf_chat", seat: pending, text: d.chat });
+        if (!c.error) {
+          solo.state = c.state;
+          saveSolo();
+        }
+      }
+      let r = d.action ? game.advance(solo.state, d.action) : { error: "ai-failed" };
       if (r.error) r = game.applyFallback(solo.state, pending); // §8.4 确定性回退，不打断游戏
       if (r.error) break; // 回退与内核同源，理论上不可达；防死循环兜底
       solo.state = r.state;
@@ -241,6 +258,7 @@ async function submitAct(action, body) {
 const onlineActions = {
   speak: (text) => submitAct("speak", { text }),
   vote: (target) => submitAct("vote", { target }),
+  wolfChat: (text) => submitAct("wolf-chat", { text }),
   wolfTarget: (target) => submitAct("wolf-target", { target }),
   seerCheck: (target) => submitAct("seer-check", { target }),
   witchSave: () => submitAct("witch-move", { move: "save" }),
@@ -416,6 +434,24 @@ function bind() {
     }
     ai.saveConfig({ baseUrl, key: $("cfg-key").value, model: $("cfg-model").value });
     ui.toast("已保存（只存本机浏览器）");
+  });
+
+  /* 测试连接：用输入框里的当前值（未保存也能测），走与游戏相同的 /api/ai-proxy 链路 */
+  $("cfg-test").addEventListener("click", async () => {
+    const btn = $("cfg-test");
+    const out = $("cfg-test-result");
+    btn.disabled = true;
+    out.hidden = false;
+    out.textContent = "测试中…（最长 15 秒）";
+    const r = await ai.testConnection({
+      baseUrl: $("cfg-baseurl").value.trim(),
+      key: $("cfg-key").value,
+      model: $("cfg-model").value,
+    });
+    btn.disabled = false;
+    out.textContent = r.ok
+      ? `连接正常 · ${r.ms}ms · 上游回复：${r.reply}`
+      : `连接失败：${r.error}`;
   });
 }
 

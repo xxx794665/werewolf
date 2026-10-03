@@ -32,9 +32,21 @@ function newRoom(nicks, seed = 42) {
   return { state: r.state, events: r.events };
 }
 
+/** §4.1.1 狼队全员投票定刀：所有存活狼依次投 target（跳过已投者），返回最终结果。 */
+function wolfVoteAll(s, target) {
+  let r = null;
+  for (const w of s.players.filter((p) => p && p.alive && p.role === 'werewolf').map((p) => p.seat)) {
+    if (s.night && s.night.wolfVotes[w] !== undefined) continue; // 已被回退或先前用例投过
+    r = adv(s, { type: 'wolf_target', seat: w, target });
+    assert.equal(r.error, null, `wolf_target(${w}) 不应失败：${r.error}`);
+    s = r.state;
+  }
+  return r;
+}
+
 /** 打完一整夜（狼刀 → 验人 → 用药 → 结算）。返回最后一次 advance 的结果（含天亮公告）。 */
 function playNight(s, { blade, check, witchMove }) {
-  let r = adv(s, { type: 'wolf_target', seat: game.wolfCaptain(s), target: blade });
+  let r = wolfVoteAll(s, blade);
   assert.equal(r.error, null, `wolf_target 不应失败：${r.error}`);
   s = r.state;
   if (s.subPhase === 'seer') {
@@ -138,7 +150,7 @@ test('夜晚结算：刀与毒各杀一人 → 天亮一次性公布双死者并
   const wolf = seatsOf(s0, 'werewolf')[0];
   const v1 = seatsOf(s0, 'villager')[0];
   const v2 = seatsOf(s0, 'villager')[1];
-  const r1 = adv(s0, { type: 'wolf_target', seat: game.wolfCaptain(s0), target: v1 });
+  const r1 = wolfVoteAll(s0, v1);
   assert.equal(r1.error, null);
   assert.deepEqual(r1.events, [], '狼人行动不产生公开事件（§4.1.5）');
   const r2 = adv(r1.state, { type: 'seer_check', seat: seatOf(s0, 'seer'), target: v2 });
@@ -209,7 +221,7 @@ test('女巫口径：首夜可自救；解药耗尽不再看刀口也救不了�
   const d1 = castVotes(day.state, votes); // 全员弃票 → 平安日 → 第二夜
   assert.equal(d1.state.phase, 'night');
   assert.equal(d1.state.day, 2);
-  const w1 = adv(d1.state, { type: 'wolf_target', seat: game.wolfCaptain(d1.state), target: witchA });
+  const w1 = wolfVoteAll(d1.state, witchA);
   const w2 = adv(w1.state, { type: 'seer_check', seat: seatOf(w1.state, 'seer'), target: seatsOf(roomA.state, 'villager')[0] });
   assert.equal(w2.state.subPhase, 'witch');
   assert.equal(game.witchSeesBlade(w2.state), null, '解药耗尽后不再显示刀口（§5.2）');
@@ -225,7 +237,7 @@ test('女巫口径：首夜可自救；解药耗尽不再看刀口也救不了�
   const votesB = {};
   for (const p of dayB.state.players) if (p.alive) votesB[p.seat] = null;
   const d1b = castVotes(dayB.state, votesB);
-  const wb1 = adv(d1b.state, { type: 'wolf_target', seat: game.wolfCaptain(d1b.state), target: witchB });
+  const wb1 = wolfVoteAll(d1b.state, witchB);
   const wb2 = adv(wb1.state, { type: 'seer_check', seat: seatOf(wb1.state, 'seer'), target: seatsOf(roomB.state, 'villager')[1] });
   assert.equal(game.witchSeesBlade(wb2.state), witchB, '解药在手时女巫可见刀口');
   const wb3 = adv(wb2.state, { type: 'witch_move', seat: witchB, move: 'save' });
@@ -242,13 +254,13 @@ test('预言家：验人结果记入私有历史（isWolf 两态）；禁验自�
   const seer = seatOf(s0, 'seer');
   const wolf = seatsOf(s0, 'werewolf')[0];
   const v0 = seatsOf(s0, 'villager')[0];
-  const r1 = adv(s0, { type: 'wolf_target', seat: game.wolfCaptain(s0), target: v0 });
+  const r1 = wolfVoteAll(s0, v0);
   const r2 = adv(r1.state, { type: 'seer_check', seat: seer, target: wolf });
   assert.equal(r2.error, null);
   assert.deepEqual(r2.state.seerChecks, [{ night: 1, target: wolf, isWolf: true }]);
   assert.equal(r2.state.subPhase, 'witch');
   const roomB = newRoom(['张三', '李四', '王五'], 43);
-  const rb = adv(roomB.state, { type: 'wolf_target', seat: game.wolfCaptain(roomB.state), target: seatsOf(roomB.state, 'villager')[0] });
+  const rb = wolfVoteAll(roomB.state, seatsOf(roomB.state, 'villager')[0]);
   const rb2 = adv(rb.state, { type: 'seer_check', seat: seatOf(roomB.state, 'seer'), target: seatsOf(roomB.state, 'villager')[1] });
   assert.deepEqual(rb2.state.seerChecks, [{ night: 1, target: seatsOf(roomB.state, 'villager')[1], isWolf: false }]);
   // 禁验自己
@@ -610,23 +622,90 @@ test('狼队长：真人优先，多人取座位号最小；否则座位号最�
   else assert.equal(game.wolfCaptain(s), null);
 });
 
+/* ---------------- 狼队密聊与投票定刀（§4.1.1） ---------------- */
+
+test('狼队定刀投票：多数决；平票由狼队长裁定（队长票在平票集合中则从其票）', () => {
+  const { state: s0 } = newRoom(['张三', '李四', '王五'], 42);
+  const wolves = seatsOf(s0, 'werewolf');
+  const cap = game.wolfCaptain(s0);
+  const v1 = seatsOf(s0, 'villager')[0];
+  const v2 = seatsOf(s0, 'villager')[1];
+  const seerSeat = seatOf(s0, 'seer');
+  const mates = wolves.filter((s) => s !== cap);
+
+  // 多数决：两票 v1、一票 v2 → 刀 v1；未投完时停狼阶段
+  let r = adv(s0, { type: 'wolf_target', seat: mates[0], target: v1 });
+  assert.equal(r.error, null);
+  assert.equal(r.state.subPhase, 'wolf', '还有队友未投票 → 停在狼阶段');
+  assert.equal(adv(r.state, { type: 'wolf_target', seat: mates[0], target: v2 }).error, '你已投过票，不可更改', '一狼一票不可改');
+  r = adv(r.state, { type: 'wolf_target', seat: cap, target: v1 });
+  r = adv(r.state, { type: 'wolf_target', seat: mates[1], target: v2 });
+  assert.equal(r.error, null);
+  assert.equal(r.state.night.blade, v1, '最高票出局');
+  assert.notEqual(r.state.subPhase, 'wolf', '全票投完立即推进');
+
+  // 平票：三狼各投不同目标 → 三方平票 → 队长的票一锤定音
+  let t = adv(s0, { type: 'wolf_target', seat: cap, target: v2 });
+  t = adv(t.state, { type: 'wolf_target', seat: mates[0], target: v1 });
+  t = adv(t.state, { type: 'wolf_target', seat: mates[1], target: seerSeat });
+  assert.equal(t.error, null);
+  assert.equal(t.state.night.blade, v2, '三方平票 → 队长的票裁定');
+});
+
+test('狼队密聊：仅存活狼、限长限次、不产生公开事件（§4.1.1）', () => {
+  const { state: s0 } = newRoom(['张三', '李四', '王五'], 42);
+  const wolves = seatsOf(s0, 'werewolf');
+  const villager = seatsOf(s0, 'villager')[0];
+  assert.equal(adv(s0, { type: 'wolf_chat', seat: villager, text: '我是好人' }).error, '只有存活狼人可以参与密聊');
+  assert.equal(adv(s0, { type: 'wolf_chat', seat: wolves[0], text: '' }).error, '密聊内容不能为空');
+  assert.ok(
+    adv(s0, { type: 'wolf_chat', seat: wolves[0], text: 'x'.repeat(61) }).error.includes('60'),
+    '每条不超过 60 字'
+  );
+  let r = adv(s0, { type: 'wolf_chat', seat: wolves[0], text: '刀 4 号，白天我跳预言家' });
+  assert.equal(r.error, null);
+  assert.deepEqual(r.events, [], '密聊不产生公开事件（§4.1.5）');
+  assert.deepEqual(r.state.night.wolfChat, [{ seat: wolves[0], text: '刀 4 号，白天我跳预言家' }]);
+  let s = r.state;
+  for (let i = 0; i < game.WOLF_CHAT_TURNS - 1; i++) {
+    s = adv(s, { type: 'wolf_chat', seat: wolves[0], text: `补 ${i}` }).state;
+  }
+  assert.ok(adv(s, { type: 'wolf_chat', seat: wolves[0], text: '第六条' }).error.includes('5 条'), '每晚每狼限 5 条');
+  // 死狼被拒（白盒标记死亡）；天亮结算后 night 清空、密聊随夜蒸发
+  const sDead = structuredClone(s);
+  sDead.players[wolves[1] - 1].alive = false;
+  assert.equal(adv(sDead, { type: 'wolf_chat', seat: wolves[1], text: '我还想聊' }).error, '只有存活狼人可以参与密聊');
+  const dawn = playNight(s0, { blade: villager, witchMove: { move: 'skip' } });
+  assert.equal(dawn.state.night, null, '天亮密聊即清');
+});
+
+test('待行动座位：狼阶段 = 第一个未投票的存活狼（AI 驱动与 150s 超时按此逐狼推进）', () => {
+  const { state: s0 } = newRoom(['张三', '李四', '王五'], 42);
+  const wolves = seatsOf(s0, 'werewolf');
+  const first = Math.min(...wolves);
+  assert.equal(game.pendingSeat(s0), first);
+  const r = adv(s0, { type: 'wolf_target', seat: first, target: 1 });
+  assert.equal(r.error, null);
+  assert.equal(game.pendingSeat(r.state), Math.min(...wolves.filter((w) => w !== first)), '下一个未投票的狼');
+});
+
 /* ---------------- 行动校验与纯度 ---------------- */
 
 test('行动校验：越权 / 非法目标 / 错误阶段一律拒绝，失败时返回原状态引用且零事件', () => {
   const { state: s0 } = newRoom(['张三', '李四', '王五'], 42);
-  const cap = game.wolfCaptain(s0);
-  const notCap = s0.players.find((p) => p.alive && p.seat !== cap).seat;
-  assert.equal(adv(s0, { type: 'wolf_target', seat: notCap, target: 1 }).error, '只有狼队长可以定刀');
-  const bad = adv(s0, { type: 'wolf_target', seat: notCap, target: 1 });
+  const notWolf = s0.players.find((p) => p.alive && p.role !== 'werewolf').seat;
+  assert.equal(adv(s0, { type: 'wolf_target', seat: notWolf, target: 1 }).error, '只有存活狼人可以投票定刀');
+  const bad = adv(s0, { type: 'wolf_target', seat: notWolf, target: 1 });
   assert.equal(bad.state, s0, '失败必须原样返回入参状态（纯函数）');
   assert.deepEqual(bad.events, []);
   // 刀口必须存活（不可空刀）
   const sDead = structuredClone(s0);
   sDead.players[3].alive = false; // 白盒：座位 4 已死
-  assert.equal(adv(sDead, { type: 'wolf_target', seat: game.wolfCaptain(sDead), target: 4 }).error, '刀口必须是存活玩家（狼不可空刀，§5.10）');
-  // 错误阶段
-  const sSeer = adv(s0, { type: 'wolf_target', seat: cap, target: 1 }).state;
-  assert.equal(adv(sSeer, { type: 'wolf_target', seat: cap, target: 2 }).error, '当前不是狼人定刀阶段');
+  const deadWolf = sDead.players.find((p) => p.alive && p.role === 'werewolf').seat;
+  assert.equal(adv(sDead, { type: 'wolf_target', seat: deadWolf, target: 4 }).error, '刀口必须是存活玩家（狼不可空刀，§5.10）');
+  // 错误阶段（全员投票定刀后才离开狼阶段）
+  const sSeer = wolfVoteAll(s0, 1).state;
+  assert.equal(adv(sSeer, { type: 'wolf_target', seat: seatsOf(s0, 'werewolf')[0], target: 2 }).error, '当前不是狼人定刀阶段');
   assert.equal(adv(sSeer, { type: 'speak', seat: 1, text: 'x' }).error, '当前不是可发言阶段');
   assert.equal(adv(sSeer, { type: 'vote', seat: 1, target: 2 }).error, '当前不是投票阶段');
   assert.equal(adv(sSeer, { type: 'hunter_shoot', seat: seatOf(s0, 'hunter'), target: 1 }).error, '当前不是猎人开枪阶段');
@@ -664,15 +743,17 @@ test('行动校验：越权 / 非法目标 / 错误阶段一律拒绝，失败�
 
 test('确定性回退：同状态同结果；狼刀随机存活、女巫跳过、猎人不开枪、发言固定兜底句、投票不投自己', () => {
   const { state: s0 } = newRoom(['张三', '李四', '王五'], 42);
-  const cap = game.wolfCaptain(s0);
-  // 狼刀回退：随机存活玩家（确定性 = 同状态必同结果）
-  const fa = game.applyFallback(s0, cap);
-  const fb = game.applyFallback(s0, cap);
+  // 狼刀回退：未投票的狼被回退 → 随机投一票（同状态必同结果）；全员投完才定刀
+  const first = game.pendingSeat(s0);
+  const fa = game.applyFallback(s0, first);
+  const fb = game.applyFallback(s0, first);
   assert.equal(fa.error, null, fa.error);
   assert.deepEqual(fa.state, fb.state, '回退必须是纯函数');
-  assert.ok(at(s0, fa.state.night.blade).alive, '回退刀口必须是存活玩家');
+  assert.ok(fa.state.night.wolfVotes[first] != null, '回退为该狼投出一票');
+  const done = wolfVoteAll(fa.state, seatsOf(s0, 'villager')[0]);
+  assert.ok(at(s0, done.state.night.blade).alive, '最终刀口必须是存活玩家');
   // 女巫回退 = 跳过 → 直接天亮结算
-  const w1 = adv(s0, { type: 'wolf_target', seat: cap, target: seatsOf(s0, 'villager')[0] });
+  const w1 = wolfVoteAll(s0, seatsOf(s0, 'villager')[0]);
   const w2 = adv(w1.state, { type: 'seer_check', seat: seatOf(s0, 'seer'), target: seatsOf(s0, 'villager')[1] });
   assert.equal(w2.state.subPhase, 'witch');
   const fw = game.applyFallback(w2.state, seatOf(s0, 'witch'));
@@ -714,12 +795,17 @@ test('确定性回退：同状态同结果；狼刀随机存活、女巫跳过�
 test('pendingSeat：各阶段指向正确的待行动座位', () => {
   const { state: s0 } = newRoom(['张三', '李四', '王五'], 42);
   assert.equal(game.pendingSeat(game.createInitialState()), null, 'lobby 无待行动');
-  assert.equal(game.pendingSeat(s0), game.wolfCaptain(s0));
-  const t1 = s0.players.find((p) => p.alive && p.seat !== game.wolfCaptain(s0)).seat;
-  const r1 = adv(s0, { type: 'wolf_target', seat: game.wolfCaptain(s0), target: t1 });
-  assert.equal(game.pendingSeat(r1.state), seatOf(s0, 'seer'));
-  const t2 = s0.players.find((p) => p.alive && p.role !== 'seer').seat;
-  const r2 = adv(r1.state, { type: 'seer_check', seat: seatOf(s0, 'seer'), target: t2 });
+  // §4.1.1 狼阶段：第一个未投票的存活狼；逐狼投票直到全员投完才推进
+  assert.equal(game.pendingSeat(s0), Math.min(...seatsOf(s0, 'werewolf')));
+  const wolves = seatsOf(s0, 'werewolf');
+  let cur = s0;
+  for (const w of wolves) {
+    assert.equal(game.pendingSeat(cur), w, `按座位序轮到未投票的狼 ${w}`);
+    cur = adv(cur, { type: 'wolf_target', seat: w, target: seatsOf(s0, 'villager')[0] }).state;
+  }
+  assert.equal(game.pendingSeat(cur), seatOf(cur, 'seer'), '全狼投完 → 预言家');
+  const t2 = cur.players.find((p) => p.alive && p.role !== 'seer').seat;
+  const r2 = adv(cur, { type: 'seer_check', seat: seatOf(cur, 'seer'), target: t2 });
   assert.equal(game.pendingSeat(r2.state), seatOf(s0, 'witch'));
   const peace = playNight(s0, { blade: seatsOf(s0, 'villager')[0], witchMove: { move: 'save' } });
   assert.equal(game.pendingSeat(peace.state), peace.state.queue[0], '发言阶段 = 队列头');

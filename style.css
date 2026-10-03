@@ -342,3 +342,50 @@ input {
 /* ---------- 其它 ---------- */
 .btn-leave { width: 100%; }
 .noscript-note { padding: 20px 14px; color: var(--muted); }
+
+/* ---------- 狼队密聊 + 下拉投票（§4.1.1，仅狼座可见的面板元素） ---------- */
+.wolf-chat {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.wolf-chat-line {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--danger);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.wolf-chat-line.me { border-left-color: var(--accent); }
+.wolf-chat-empty { color: var(--muted); border-left-color: var(--line); }
+.chat-input-row { display: flex; gap: 8px; margin-bottom: 12px; }
+.chat-input {
+  font: inherit; /* ≥16px：iOS 聚焦不放大（同 .speech-input 口径） */
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+  flex: 1;
+}
+.chat-input-row .btn { min-height: var(--min-tap); flex: none; }
+.wolf-vote-row { display: flex; gap: 8px; margin: 8px 0; }
+.vote-select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-width: 0;
+  flex: 1;
+  min-height: var(--min-tap);
+}
+.wolf-vote-row .btn { min-height: var(--min-tap); flex: none; }

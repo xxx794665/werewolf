@@ -73,14 +73,21 @@ test("parseReply：行动类 save / skip / 首个 1–9 数字（宽容序）", 
   assert.deepEqual(ai.parseReply("witch", "SAVE"), { type: "witch_move", move: "save" });
   assert.deepEqual(ai.parseReply("witch", "skip"), { type: "witch_move", move: "skip" });
   assert.deepEqual(ai.parseReply("witch", "毒 7 号"), { type: "witch_move", move: "poison", target: 7 });
-  assert.deepEqual(ai.parseReply("wolf", "我刀 4。"), { type: "wolf_target", target: 4 });
-  assert.equal(ai.parseReply("wolf", "skip"), null); // 狼不可空刀（§5.10）→ 解析失败走回退
+  assert.equal(ai.parseReply("wolf", "我刀 4。"), null); // 狼阶段改走 parseWolfReply 两行解析
   assert.equal(ai.parseReply("seer", "skip"), null); // 验人不可跳过
   assert.deepEqual(ai.parseReply("hunter", "skip"), { type: "hunter_shoot", target: null });
   assert.deepEqual(ai.parseReply("vote", "  Skip。"), { type: "vote", target: null }); // 清洗后整串命中 skip
   assert.equal(ai.parseReply("vote", "我弃票吧"), null); // 非整串命中 → 无数字 → 解析失败走回退（与 room-logic 同款）
   assert.deepEqual(ai.parseReply("pk_vote", "6"), { type: "vote", target: 6 });
   assert.equal(ai.parseReply("vote", "我不知道"), null);
+});
+
+test("parseWolfReply：狼阶段两行格式（首行密聊、次行投票；与 room-logic 同口径）", () => {
+  assert.deepEqual(ai.parseWolfReply("听我口型，白天别露馅。\n3"), { chat: "听我口型，白天别露馅。", target: 3 });
+  assert.deepEqual(ai.parseWolfReply("过\n7"), { chat: null, target: 7 }); // 「过」= 无话可说
+  assert.deepEqual(ai.parseWolfReply("5"), { chat: null, target: 5 }); // 纯数字单行 = 只投票
+  assert.deepEqual(ai.parseWolfReply("先压 4 号"), { chat: "先压 4 号", target: null }); // 只聊天 → 投票走回退
+  assert.deepEqual(ai.parseWolfReply(""), { chat: null, target: null });
 });
 
 test("toHistory：内核公开事件 → §1.3 history（平票拆 tie + exile）", () => {
