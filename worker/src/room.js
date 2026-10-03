@@ -11,7 +11,8 @@
  * alarm：行动超时 150s / 托管 / 房主作废（room-logic.nextAlarmAt 排程）。
  * drive_ai（服务端发起 AI 行动，docs/ai-prompts.md §5.3.2 变体）：
  *   房主带 BYO 配置调用 → DO 组装提示词（shared/prompts.js）→ proxyFetch
- *   （90s 超时、截断放宽重试 1 次）→ 解析 → 提交内核；失败走确定性回退。
+ *   （45s + 25s 两次尝试：失败 / 格式不合格重试 1 次，§8.4）→ 解析 + 干跑
+ *   校验 → 提交内核；失败走确定性回退。
  *   Key 只在请求内瞬态使用，不落盘不打日志。
  * ============================================================ */
 
@@ -19,8 +20,8 @@ import * as logic from './room-logic.js';
 import * as game from '../../shared/game.js';
 import { drawRoster } from '../../shared/roster.js';
 import { checkUrl } from './url-guard.js';
-import { proxyFetch, UPSTREAM_TIMEOUT_MS, isDefaultAiUrl } from './ai-proxy.js';
-import { extractContent, AI_TOKEN_BUDGET } from '../../shared/prompts.js';
+import { proxyFetch, isDefaultAiUrl } from './ai-proxy.js';
+import { extractContent, AI_TOKEN_BUDGET, AI_ATTEMPT_TIMEOUTS_MS } from '../../shared/prompts.js';
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -155,7 +156,8 @@ export class Room {
   /**
    * 服务端发起 AI 座位行动（§5.3.2 路径）：按 docs/ai-prompts.md 数据契约
    * 组装请求（history 窗口 + 该座位 roleCard + buildMessages）→ url-guard →
-   * proxyFetch（30s ×2 次尝试）→ §5.1 解析 → 提交内核；任一失败走 §8.4
+   * proxyFetch（45s + 25s 两次尝试：请求失败 / 未回复符合格式的回复重试 1 次，
+   * §8.4）→ digestAIReply 解析 + 干跑校验 → 提交内核；任一失败走 §8.4
    * 确定性回退（与客户端路径同构，DO 是行动合法性的最终权威）。
    */
   async driveAI(body, now) {
@@ -177,52 +179,58 @@ export class Room {
       if (game.pendingSeat(fresh.game) !== seat) return json({ error: 'STALE', message: '座位已行动' }, 409);
       const req = logic.buildAIRequest(fresh, seat, { baseUrl: body.baseUrl, model: body.model, maxTokens: body.maxTokens });
       if (req.error) return json({ error: 'BAD_REQUEST', message: req.error }, 400);
+      const phase = logic.phaseOf(fresh.game);
 
-      let text = null;
-      if (!req.error) {
-        const guard = checkUrl(req.url);
-        if (guard == null) {
-          /* 体验通道：房主未带 key 且目标是体验通道上游 → 注入 Secret（与 /api/ai-proxy 同口径） */
-          const outKey = body.key || (this.env.DEFAULT_AI_KEY && isDefaultAiUrl(req.url) ? this.env.DEFAULT_AI_KEY : '');
-          text = await this.fetchAI(req.url, req.body, outKey);
+      /* 请求 → 解析 → 干跑校验；失败 / 未回复符合格式的回复重试 1 次（45s + 25s，
+         总预算 < 150s 行动超时的一半，§8.4）；starved 放宽一倍预算占用本次重试 */
+      let pick = null; // 校验通过的 AI 回复 { chat, action }
+      let lastChat = null; // 狼阶段最后一次解析出的密聊（重试失败也带上，§4.1.1）
+      const guard = checkUrl(req.url);
+      if (guard == null) {
+        /* 体验通道：房主未带 key 且目标是体验通道上游 → 注入 Secret（与 /api/ai-proxy 同口径） */
+        const outKey = body.key || (this.env.DEFAULT_AI_KEY && isDefaultAiUrl(req.url) ? this.env.DEFAULT_AI_KEY : '');
+        let budget = req.body.max_tokens;
+        for (const timeoutMs of AI_ATTEMPT_TIMEOUTS_MS) {
+          const r = await this.fetchOnce(req.url, req.body, outKey, budget, timeoutMs);
+          if (r.starved) budget = Math.min(AI_TOKEN_BUDGET.max, budget * 2); // 思考烧光预算 → 放宽一倍
+          const d = logic.digestAIReply(fresh.game, phase, seat, r.content);
+          if (d.chat) lastChat = d.chat;
+          if (d.action) {
+            pick = d;
+            break;
+          }
         }
       }
-      const phase = logic.phaseOf(fresh.game);
-      const wolf = phase === 'wolf' && text != null ? logic.parseWolfReply(text) : null; // §4.1.1 两行格式
-      const parsed = text != null && phase !== 'wolf' ? logic.parseAIReply(phase, text) : null;
 
       /* 提交（AI 结果或回退）都基于提交瞬间的最新状态；再撞 STALE 就回错 */
       let out = null;
       let via = null;
       let latest = await this.load();
       if (game.pendingSeat(latest.game) === seat) {
-        if (wolf) {
-          // 狼阶段一次调用两段提交：先密聊（可选），后投票（缺票走回退随机）
-          if (wolf.chat) {
-            const c = logic.applyGameAction(latest, { type: 'wolf_chat', seat, text: wolf.chat }, Date.now());
+        if (pick) {
+          // 狼阶段一次调用两段提交：先密聊（可选），后投票
+          if (pick.chat) {
+            const c = logic.applyGameAction(latest, { type: 'wolf_chat', seat, text: pick.chat }, Date.now());
             if (!c.error) {
               out = c;
               latest = c.room;
             }
           }
-          if (wolf.target != null) {
-            const v = logic.applyGameAction(latest, { type: 'wolf_target', seat, target: wolf.target }, Date.now());
-            if (!v.error) {
-              out = v;
-              via = 'ai';
-            }
-          } else if (out != null) {
-            const fb = logic.applyFallbackFor(latest, seat, Date.now()); // 只聊了天没投票 → 随机票兜底
-            if (!fb.error) {
-              out = fb;
-              via = 'fallback';
-            }
-          }
-        } else if (parsed) {
-          const attempt = logic.applyGameAction(latest, { ...parsed, seat }, Date.now());
-          if (!attempt.error) {
-            out = attempt;
+          const v = logic.applyGameAction(latest, pick.action, Date.now());
+          if (!v.error) {
+            out = v;
             via = 'ai';
+          }
+        } else if (lastChat) {
+          const c = logic.applyGameAction(latest, { type: 'wolf_chat', seat, text: lastChat }, Date.now());
+          if (!c.error) {
+            out = c;
+            latest = c.room;
+          }
+          const fb = logic.applyFallbackFor(latest, seat, Date.now()); // 只聊了天没投票 → 随机票兜底
+          if (!fb.error) {
+            out = fb;
+            via = 'fallback';
           }
         }
         if (out == null) {
@@ -242,24 +250,21 @@ export class Room {
     }
   }
 
-  /** 出站执行：仅调用已过 url-guard 的 url；90s 超时（思考型模型流式出全文需
-   *  30–60s），正文为空且疑似截断时放宽一倍预算重试 1 次（§8.4，与客户端同口径）。 */
-  async fetchAI(url, reqBody, key) {
+  /** 单次上游尝试（不重试）：仅调用已过 url-guard 的 url。
+   *  返回 { content, starved }：content = null 为请求失败 / 空正文；
+   *  starved = 正文为空且疑似截断（finish=length / 伪 500），调用方放宽
+   *  一倍预算后重试（§8.4，与客户端 requestOnce 同口径）。 */
+  async fetchOnce(url, reqBody, key, budget, timeoutMs) {
     const headers = { 'content-type': 'application/json' };
     if (key) headers.authorization = `Bearer ${key}`; // 瞬态透传，不落盘不打日志
-    let budget = reqBody.max_tokens || AI_TOKEN_BUDGET.default;
-    for (let i = 0; i < 2; i++) {
-      const out = await proxyFetch(url, headers, JSON.stringify({ ...reqBody, max_tokens: budget }), UPSTREAM_TIMEOUT_MS);
-      if (out.error) continue;
-      const { content, finish } = extractContent(out.text);
-      if (content.trim()) return content; // 截断但有正文也用（解析端按 200 字硬上限截断）
-      const starved = finish === 'length' || (out.status >= 500 && out.text.indexOf('empty response content') >= 0);
-      if (starved) {
-        budget = Math.min(AI_TOKEN_BUDGET.max, budget * 2); // 思考烧光预算 → 放宽一倍
-        continue;
-      }
-    }
-    return null;
+    const out = await proxyFetch(url, headers, JSON.stringify({ ...reqBody, max_tokens: budget }), timeoutMs);
+    if (out.error) return { content: null, starved: false };
+    const { content, finish } = extractContent(out.text);
+    if (content.trim()) return { content, starved: false }; // 截断但有正文也用（解析端按 200 字硬上限截断）
+    return {
+      content: null,
+      starved: finish === 'length' || (out.status >= 500 && out.text.indexOf('empty response content') >= 0),
+    };
   }
 
   async alarm() {

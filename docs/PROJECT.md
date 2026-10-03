@@ -41,9 +41,10 @@ werewolf/
 │       │                   #   drive_ai 出站执行；一切玩法判定调 shared/game.js，本文件不写规则
 │       ├── room-logic.js   # 房间纯逻辑（node 可测）：快照按座位裁剪、rev 逐座位对比、心跳/托管/
 │       │                   #   150s 超时/房主作废（sweep）、ai_view、AI 契约（buildAIRequest /
-│       │                   #   parseAIReply / windowHistory / roleCardOf——与 js/ai.js 同款双份，ADR-0004）
+│       │                   #   parseAIReply / digestAIReply / windowHistory / roleCardOf——与 js/ai.js 同款双份，ADR-0004）
 │       ├── ai-proxy.js     # /api/ai-proxy 出站件：信封校验、转发头白名单、body ≤64KB、
-│       │                   #   proxyFetch（30s 超时、响应 ≤1MB）、同 IP 日 5000 次限流
+│       │                   #   proxyFetch（超时由调用方传入：路由 90s / drive_ai 45s+25s，响应 ≤8MB）、
+│       │                   #   同 IP 日 5000 次限流
 │       ├── url-guard.js    # SSRF 防护纯函数：checkUrl + safeOutboundUrl（一切服务端出站必过，永不简化）
 │       ├── rate-limit.js   # 建房限流（同 IP 每日 100 房）
 │       └── do-rpc.js       # DO stub RPC 收口（roomStub / doRpc，不出 Cloudflare 网络边界）
@@ -72,12 +73,12 @@ index.html 模块加载（`<script type="module">` 按依赖序）：`js/prompts
 | `shared/prompts.js` | AI 消息组装唯一实现：板子规则 / 5 角色提示词 / 9 任务 / 口吻 + `buildMessages` 白名单渲染 |
 | `js/app.js` | 屏幕流转与两种模式的接线：单机本地引擎（含 AI 驱动循环与 localStorage 断点续玩）、联机动作提交、房主 drive_ai 触发 |
 | `js/net.js` | 与 Worker 的全部 HTTP 通信：轮询（rev / unchanged / 退避 / 追赶）、身份与房间会话、`act / aiView / driveAI` |
-| `js/ai.js` | 浏览器侧 AI 数据件：BYO 配置、请求与重试、响应宽容解析、公开事件 → history、历史窗口、单机 roleCard |
-| `js/ui.js` | 只读快照渲染与交互辅助：两步确认条、toast、顶栏；不区分单机 / 联机快照来源 |
+| `js/ai.js` | 浏览器侧 AI 数据件：BYO 配置、单次请求 + 重试循环（45s+25s，§8.4）、响应宽容解析 + 干跑校验、公开事件 → history、历史窗口、单机 roleCard |
+| `js/ui.js` | 只读快照渲染与交互辅助：两步确认条、toast、顶栏、吸顶状态条倒计时；不区分单机 / 联机快照来源 |
 | `worker/src/index.js` | 入口路由与 CORS：房内动作转 DO、ai-proxy 请求侧校验、建房限流与房号生成 |
-| `worker/src/room.js` | DO 实例：分发动作、单键持久化、alarm 排程、drive_ai 出站（url-guard → proxyFetch → 解析 → 回退） |
-| `worker/src/room-logic.js` | 房间规则纯逻辑：快照裁剪（安全边界）、按座 rev、托管 / 超时 / 作废 sweep、服务端 AI 契约 |
-| `worker/src/ai-proxy.js` | AI 中转出站件：头白名单、64KB / 1MB 上限、30s 超时、日 5000 次限流 |
+| `worker/src/room.js` | DO 实例：分发动作、单键持久化、alarm 排程、drive_ai 出站（url-guard → proxyFetch 45s+25s 重试 → 解析 + 干跑校验 → 回退） |
+| `worker/src/room-logic.js` | 房间规则纯逻辑：快照裁剪（安全边界）、按座 rev、托管 / 超时 / 作废 sweep、服务端 AI 契约（含 digestAIReply） |
+| `worker/src/ai-proxy.js` | AI 中转出站件：头白名单、64KB 请求 / 8MB 响应上限、超时由调用方传入、日 5000 次限流 |
 | `worker/src/url-guard.js` | 出站 URL 校验（SSRF）：`safeOutboundUrl` 是唯一合法出口，校验与 fetch 数据流强绑定 |
 
 ## localStorage 键清单

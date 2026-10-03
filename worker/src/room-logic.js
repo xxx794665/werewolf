@@ -155,15 +155,17 @@ function privateOf(g, me) {
  * 按请求者座位裁剪的快照（纯函数、确定性：不读时钟，rev 比较才可靠）。
  * 夜里只露 phase='night' + day，不露子阶段与轮到谁（§4.1.6 夜视角冻结，
  * ADR-0002）；行动者本人拿到 action；天亮结算全员齐跳靠公开事件驱动。
- * 死亡玩家观战视角可见全员身份（§7.8，仅自己可见）。
+ * 死亡玩家在提交完自己的行动（遗言 / 开枪）后进入观战视角、可见全员身份
+ * （§7.8，仅自己可见）；轮到自己留遗言时仍按暗牌口径只看自己身份
+ * （2026-10-03 试玩反馈：亮牌不得早于本人遗言提交）。
  */
 export function snapshotFor(room, seat) {
   const g = room.game;
   const night = g.phase === 'night';
   const revealed = g.phase === 'revealed';
   const me = seat >= 1 && seat <= game.SEAT_COUNT ? g.players[seat - 1] : null;
-  const spectator = !!(me && g.phase !== 'lobby' && !me.alive && !revealed);
   const pending = g.phase === 'night' || g.phase === 'day' ? game.pendingSeat(g) : null;
+  const spectator = !!(me && g.phase !== 'lobby' && !me.alive && !revealed && pending !== me.seat);
   const snap = {
     code: room.code,
     owner: room.ownerUid,
@@ -177,9 +179,10 @@ export function snapshotFor(room, seat) {
   };
   if (!night) snap.subPhase = g.subPhase; // 夜里不露子阶段（§4.1.6）
   if (!night && pending != null) snap.pending = pending;
-  /* 白天透出行动倒计时（供 UI 吸顶状态条）；夜里不透——deadline.seat 即轮到谁，
-     会从快照泄漏夜里行动顺序（§4.1.6） */
-  if (!night && !revealed && room.deadline) snap.deadline = room.deadline;
+  /* 行动倒计时（§5.11，吸顶状态条数据源）：白天全员可见；夜里仅行动者本人
+     可见——deadline.seat 即轮到谁，透给非行动座位会泄漏夜里行动顺序（§4.1.6），
+     行动者本人本就知道轮到自己，无新信息 */
+  if (!revealed && room.deadline && (!night || pending === seat)) snap.deadline = room.deadline;
   if (!night && g.pkCandidates) snap.pkCandidates = g.pkCandidates;
   if (revealed) {
     snap.winner = g.winner;
@@ -548,8 +551,7 @@ function cleanChat(line) {
 }
 
 /** §5.1 宽容解析：先判 save / skip，再取第一个 1–9 数字；失败返回 null（回退）。
- *  狼阶段不走此函数（两行格式，见 parseWolfReply）。 */
-export function parseAIReply(phase, text) {
+ *  狼阶段不走此函数（两行格式，见 parseWolfReply）。 */export function parseAIReply(phase, text) {
   if (typeof text !== 'string') return null;
   if (phase === 'speak' || phase === 'lastwords' || phase === 'pk_speak') {
     const t = text.trim().slice(0, 200); // >200 截断（§5.8 硬上限）
@@ -578,6 +580,38 @@ export function parseAIReply(phase, text) {
       return { type: 'vote', target: n };
     default:
       return null;
+  }
+}
+
+/**
+ * AI 回复 → 可用动作（§5.1 解析 + 内核干跑校验，纯函数不入账）：解析成功但
+ * 动作非法（目标已死 / 非队列头 / PK 台外等）与解析失败同罪，都算「未正常
+ * 回复符合格式的回复」，由调用方重试 1 次或走确定性回退（§8.4）。
+ * wolf 阶段两行格式（密聊 + 刀口）；chat 尽力保留（有话没票时仍可入账）。
+ * 返回 { chat, action }：action = null 表示本条回复不可用。
+ * 与 js/ai.js decideFor 内的 digestReply 同口径（两边刻意各自持有）。
+ */
+export function digestAIReply(g, phase, seat, text) {
+  const out = { chat: null, action: null };
+  if (typeof text !== 'string' || !text.trim()) return out;
+  try {
+    if (phase === 'wolf') {
+      const w = parseWolfReply(text);
+      out.chat = w.chat;
+      if (w.target == null) return out;
+      const action = { type: 'wolf_target', seat, target: w.target };
+      if (game.advance(g, action).error) return out;
+      out.action = action;
+      return out;
+    }
+    const parsed = parseAIReply(phase, text);
+    if (!parsed) return out;
+    const action = { ...parsed, seat };
+    if (game.advance(g, action).error) return out;
+    out.action = action;
+    return out;
+  } catch (e) {
+    return out;
   }
 }
 

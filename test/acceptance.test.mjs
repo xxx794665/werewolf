@@ -342,6 +342,62 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
   }
 });
 
+test('单机 decideFor 重试（§8.4）：第一次失败 / 格式不合格 → 恰好重试 1 次；两次皆败回 null', async () => {
+  ai.saveConfig({ baseUrl: 'https://stub.example.com/v1', key: 'k', model: 'm' });
+  let s = game.advance(game.createInitialState(), { type: 'join', nick: '独行', uid: 'u-retry' }).state;
+  s = game.advance(s, { type: 'ready', seat: 1, ready: true }).state;
+  s = game.advance(s, { type: 'start', seed: 20261003, solo: true }).state;
+  const log = [];
+  const realFetch = globalThis.fetch;
+  const aliveSeats = () => s.players.filter((p) => p && p.alive).map((p) => p.seat);
+  try {
+    let calls = 0;
+    const replies = [];
+    globalThis.fetch = async () => {
+      calls += 1;
+      const r = replies.shift();
+      if (r === 'throw') throw new Error('down');
+      return new Response(JSON.stringify({ choices: [{ message: { content: r } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+
+    /* 场景 1：狼阶段第一次请求抛错 → 第二次合法（两行格式）→ 恰好 2 次请求 */
+    const wolf = game.pendingSeat(s);
+    const others = aliveSeats().filter((x) => x !== wolf);
+    replies.push('throw', `盯一下\n${others[0]}`);
+    const d1 = await ai.decideFor(s, log, wolf);
+    assert.equal(calls, 2, '第一次请求失败 → 恰好重试 1 次');
+    assert.equal(d1.action && d1.action.type, 'wolf_target', '重试成功返回合法动作');
+    assert.ok(d1.chat, '密聊内容随重试成功一并返回');
+
+    /* 场景 2：白盒进白天投票，第一次回复无数字（格式不合格）→ 重试后合法 */
+    const g2 = structuredClone(s);
+    g2.phase = 'day';
+    g2.subPhase = 'vote';
+    g2.votes = { round: 'main', cast: {} };
+    g2.queue = [];
+    calls = 0;
+    replies.push('我还没想好', String(others[0]));
+    const d2 = await ai.decideFor(g2, log, 2);
+    assert.equal(calls, 2, '格式不合格 → 恰好重试 1 次');
+    assert.deepEqual(d2.action, { type: 'vote', seat: 2, target: others[0] }, '重试后解析 + 干跑校验通过');
+
+    /* 场景 3：目标非法（投已死座位）也算格式不合格 → 重试；两次皆败 → null（走回退） */
+    g2.players[8].alive = false;
+    g2.players[8].death = { day: 1, cause: 'blade' };
+    calls = 0;
+    replies.push('9', 'throw');
+    const d3 = await ai.decideFor(g2, log, 2);
+    assert.equal(calls, 2, '非法目标同样触发重试，两次封顶');
+    assert.equal(d3.action, null, '两次皆败 → 调用方走确定性回退');
+    assert.equal(d3.chat, null, '非狼阶段不带回退密聊');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 /* ============================================================
  * 2. 联机完整对局（驱动 worker/src/room-logic.js 纯逻辑层）
  * ============================================================ */

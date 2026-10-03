@@ -135,6 +135,15 @@ export function clampMaxTokens(v) {
   return Math.max(AI_TOKEN_BUDGET.min, Math.min(AI_TOKEN_BUDGET.max, n));
 }
 
+/* ---------- 行动时间预算（§8.4 / §5.11）：尝试超时与重试次数 ----------
+ * 2026-10-03 试玩反馈：第一次请求失败 / 未回复符合格式的回复 → 重试 1 次；
+ * 两次尝试的超时合计控制在一轮行动超时（150s）的一半以内。两次不等长：
+ * 第一次 45s 尽量盖住思考型模型 30–60s 的流式出文窗口，第二次 25s 快速
+ * 兜住瞬失败（5xx / 断流 / 空正文）；合计 70s < 75s。 */
+export const AI_ATTEMPT_TIMEOUTS_MS = [45_000, 25_000];
+/** 单个 AI 行动的总时间预算（两次尝试 + 回退提交余量）：单机倒计时数据源。 */
+export const AI_STEP_BUDGET_MS = AI_ATTEMPT_TIMEOUTS_MS[0] + AI_ATTEMPT_TIMEOUTS_MS[1] + 5_000;
+
 /* ---------- 响应侧纯函数：从 OpenAI 兼容响应提取正文 ----------
  * js/ai.js（单机）与 Worker fetchAI（联机）共用，ADR-0001 单份原则。覆盖：
  *   1. stream:true 的 SSE 文本（data: 帧聚合 delta.content，记录 finish_reason）；

@@ -93,8 +93,10 @@ function soloSnap() {
   const night = g.phase === "night";
   const revealed = g.phase === "revealed";
   const meP = g.players[0]; // 单机真人恒为 1 号
-  const spectator = g.phase !== "lobby" && !revealed && !meP.alive;
   const pending = g.phase === "night" || g.phase === "day" ? game.pendingSeat(g) : null;
+  /* 死者观战亮牌时机：自己还有待提交行动（遗言 / 开枪）时只看自己身份，
+     提交后可见全员身份（§7.8，2026-10-03 试玩反馈定的时机） */
+  const spectator = g.phase !== "lobby" && !revealed && !meP.alive && pending !== 1;
   const s = {
     solo: true,
     code: null,
@@ -116,6 +118,11 @@ function soloSnap() {
     s.subPhase = g.subPhase; // §4.1.6：夜里不露子阶段
     if (pending != null) s.pending = pending;
     if (g.pkCandidates) s.pkCandidates = g.pkCandidates;
+    /* 单机 AI 行动倒计时：数据源 = soloDrive 写入的行动总预算（含重试，§8.4）；
+       只在白天透出（夜里倒计时重置节奏会泄漏预言家 / 女巫是否存活，§4.1.6） */
+    if (g.phase === "day" && pending != null && g.players[pending - 1].isAI && solo.stepEndsAt) {
+      s.deadline = { at: solo.stepEndsAt, seat: pending };
+    }
   }
   if (revealed) {
     s.winner = g.winner;
@@ -193,8 +200,9 @@ async function soloDrive() {
       if (pending == null) break;
       const p = g.players[pending - 1];
       if (!p || !p.isAI) break; // 轮到玩家本人，等操作
+      solo.stepEndsAt = Date.now() + ai.AI_STEP_BUDGET_MS; // 本个 AI 行动的总预算（重试含内），倒计时数据源
       renderSolo();
-      const d = await ai.decideFor(g, solo.log, pending); // buildMessages → /api/ai-proxy → 解析
+      const d = await ai.decideFor(g, solo.log, pending); // buildMessages → /api/ai-proxy → 解析 + 干跑校验（含重试）
       if (d.chat) {
         // §4.1.1 狼队密聊：先入频道再投票（chat 不推进 pendingSeat，投票照常有效）
         const c = game.advance(solo.state, { type: "wolf_chat", seat: pending, text: d.chat });

@@ -5,8 +5,9 @@
  *   - BYO 配置读写：baseUrl / apiKey / model 只存 localStorage，按请求透传，
  *     服务端不落盘（features.md §8.2）；未配置时回退内置体验通道
  *     effectiveConfig()（key 由 Worker Secret 注入，前端不接触凭据）
- *   - requestChat(messages)：唯一请求格式（§5.0）经 Worker /api/ai-proxy 转发
- *     （浏览器不直连上游，解 CORS）；30s 超时、失败重试 1 次（§8.4）
+ *   - requestOnce(messages)：唯一请求格式（§5.0）经 Worker /api/ai-proxy 转发
+ *     （浏览器不直连上游，解 CORS）；decideFor 持重试循环——失败 / 未回复
+ *     符合格式的回复重试 1 次，两次尝试 45s + 25s = 70s < 一轮 150s 的一半（§8.4）
  *   - fetchRoster(count)：AI 名册抽取（POST /api/ai-roster，超时/失败本地兜底，
  *     ADR-0009）
  *   - parseReply(phase, text)：§5.1 宽容解析，归属本文件（§6 已知边界 3）
@@ -21,12 +22,9 @@
 
 import * as game from "../shared/game.js";
 import { drawRoster } from "../shared/roster.js";
-import { buildMessages, extractContent, clampMaxTokens, AI_TOKEN_BUDGET } from "./prompts.js";
-import { apiBase } from "./net.js";
+import { buildMessages, extractContent, clampMaxTokens, AI_TOKEN_BUDGET, AI_ATTEMPT_TIMEOUTS_MS } from "./prompts.js";import { apiBase } from "./net.js";
 
-const REQ_TIMEOUT_MS = 90_000; // §8.4 单次请求超时（思考型模型流式出全文需 30–60s，30s 必超）
-const RETRY = 2; // 共尝试 2 次（失败重试 1 次）
-
+const REQ_TIMEOUTS_MS = AI_ATTEMPT_TIMEOUTS_MS; // [45s, 25s]：失败 / 格式不合格重试 1 次，合计 70s < 一轮 150s 的一半（§8.4）
 /* [0,1) 浮点随机源（shared/roster.js 本地兜底抽取用，与 net.js uid 同款 crypto） */
 const cryptoRand = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
 
@@ -120,51 +118,43 @@ export async function fetchRoster(count) {
 /* ---------- AI 请求（§5.0 唯一格式 + §5.2 信封） ---------- */
 
 /**
- * messages = buildMessages(...) 的返回值，原样放入请求体。
- * 返回正文字符串；失败（超时 / 非 200 / 无正文 / 两次尝试皆败）返回 null，
- * 调用方按 §8.4 走确定性回退（shared/game.js applyFallback）。
- * 固定 stream:true：体验通道模型是思考型，网关只认流式（非流式恒 500
- * "empty response content"）；正文为空且 finish=length 时按截断处理，
- * 放宽一倍预算重试一次（参考母本 situation_puzzle 同款口径）。
+ * 单次尝试（不重试）：messages = buildMessages(...) 的返回值，原样放入请求体。
+ * 返回 { content, starved }：content 为正文字符串（失败 / 空正文 = null）；
+ * starved = 正文为空且疑似截断（finish=length / 伪 500 "empty response
+ * content"），调用方放宽一倍 max_tokens 后重试。固定 stream:true：体验通道
+ * 模型是思考型，网关只认流式（非流式恒 500 "empty response content"）。
  */
-export async function requestChat(messages) {
-  const cfg = effectiveConfig(); // 自带配置优先，空配置回退体验通道（key 由 Worker 注入）
-  if (!cfg.baseUrl || !cfg.model) return null;
-  let budget = cfg.maxTokens;
-  for (let attempt = 0; attempt < RETRY; attempt++) {
+async function requestOnce(cfg, messages, budget, timeoutMs) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    let res;
+    let raw;
     try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), REQ_TIMEOUT_MS);
-      let res;
-      let raw;
-      try {
-        const headers = { "content-type": "application/json" };
-        if (cfg.key) headers.authorization = `Bearer ${cfg.key}`; // 按请求透传（§8.2 头白名单）
-        res = await fetch(apiBase() + "/api/ai-proxy", {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            url: cfg.baseUrl + "/chat/completions", // §5.2：前端拼完整地址
-            body: { model: cfg.model, messages, temperature: 0.7, max_tokens: budget, stream: true },
-          }),
-          signal: ctrl.signal,
-        });
-        raw = await res.text();
-      } finally {
-        clearTimeout(t);
-      }
-      const { content, finish } = extractContent(raw);
-      if (content.trim()) return content; // 截断但有正文也用（解析端按 200 字硬上限截断）
-      const starved = finish === "length" || (res.status >= 500 && /empty response content/i.test(raw));
-      if (starved) {
-        budget = Math.min(AI_TOKEN_BUDGET.max, budget * 2); // 思考烧光预算 → 放宽一倍
-        continue;
-      }
-    } catch (e) {
-      /* 超时 / 断网 → 下一次尝试 */
+      const headers = { "content-type": "application/json" };
+      if (cfg.key) headers.authorization = `Bearer ${cfg.key}`; // 按请求透传（§8.2 头白名单）
+      res = await fetch(apiBase() + "/api/ai-proxy", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          url: cfg.baseUrl + "/chat/completions", // §5.2：前端拼完整地址
+          body: { model: cfg.model, messages, temperature: 0.7, max_tokens: budget, stream: true },
+        }),
+        signal: ctrl.signal,
+      });
+      raw = await res.text();
+    } finally {
+      clearTimeout(t);
     }
+    const { content, finish } = extractContent(raw);
+    if (content.trim()) return { content, starved: false }; // 截断但有正文也用（解析端按 200 字硬上限截断）
+    return {
+      content: null,
+      starved: finish === "length" || (res.status >= 500 && /empty response content/i.test(raw)),
+    };
+  } catch (e) {
+    return { content: null, starved: false }; // 超时 / 断网
   }
-  return null;
 }
 
 /* ---------- §5.1 响应解析（宽容序：save/skip → 第一个 1–9 数字） ----------
@@ -379,30 +369,65 @@ export function roleCardOf(g, seat) {
 }
 
 /**
- * 单机：为 AI 座位跑一次「取卡 → 组消息 → 请求 → 解析」。
+ * 回复 → 可用动作：宽容解析后用内核干跑校验（advance 纯函数不入账）——
+ * 解析成功但动作非法（目标已死 / 非队列头 / PK 台外等）与解析失败同罪，
+ * 都算「未正常回复符合格式的回复」，交由 decideFor 的重试兜住。
+ * 返回 { chat, action }：action = null 表示本条回复不可用；
+ * wolf 阶段 chat 尽力保留（有话没票时调用方仍可入账密聊）。
+ * 与 worker/src/room-logic.js digestAIReply 同口径（两边刻意各自持有）。
+ */
+function digestReply(g, phase, seat, text) {
+  const out = { chat: null, action: null };
+  if (typeof text !== "string" || !text.trim()) return out;
+  try {
+    if (phase === "wolf") {
+      const w = parseWolfReply(text);
+      out.chat = w.chat;
+      if (w.target == null) return out;
+      const action = { type: "wolf_target", target: w.target, seat };
+      if (game.advance(g, action).error) return out;
+      out.action = action;
+      return out;
+    }
+    const parsed = parseReply(phase, text);
+    if (!parsed) return out;
+    const action = { ...parsed, seat };
+    if (game.advance(g, action).error) return out;
+    out.action = action;
+    return out;
+  } catch (e) {
+    return out;
+  }
+}
+
+/**
+ * 单机：为 AI 座位跑「取卡 → 组消息 → 请求（失败 / 格式不合格重试 1 次，
+ * 总超时 70s < 一轮 150s 的一半，§8.4）→ 解析 + 干跑校验」。
  * 返回 { chat, action }：chat 为狼队密聊内容（wolf 阶段可能非 null，调用方先提交）；
- * action 为内核动作（含 seat），null = 请求失败 / 无有效投票，调用方走回退。
+ * action 为内核动作（含 seat），null = 两次尝试皆无可用回复，调用方走回退。
  * buildMessages 抛错（白名单 / 角色强一致校验）按请求失败处理（§1.4 / §8.4）。
  */
 export async function decideFor(g, log, seat) {
   const phase = phaseOf(g);
   if (!phase) return { chat: null, action: null };
+  const cfg = effectiveConfig(); // 自带配置优先，空配置回退体验通道（key 由 Worker 注入）
+  if (!cfg.baseUrl || !cfg.model) return { chat: null, action: null };
+  let messages;
   try {
-    const card = roleCardOf(g, seat);
-    const messages = buildMessages(windowHistory(log), card, phase);
-    const text = await requestChat(messages);
-    if (phase === "wolf") {
-      const w = text != null ? parseWolfReply(text) : { chat: null, target: null };
-      return {
-        chat: w.chat,
-        action: w.target != null ? { type: "wolf_target", target: w.target, seat } : null,
-      };
-    }
-    const parsed = text != null ? parseReply(phase, text) : null;
-    return { chat: null, action: parsed ? { ...parsed, seat } : null };
+    messages = buildMessages(windowHistory(log), roleCardOf(g, seat), phase);
   } catch (e) {
-    return { chat: null, action: null };
+    return { chat: null, action: null }; // §8.4：提示词校验失败走确定性回退
   }
+  let budget = cfg.maxTokens;
+  let lastChat = null; // 狼队密聊：最后一次解析出的话（重试失败也带上，§4.1.1）
+  for (let i = 0; i < REQ_TIMEOUTS_MS.length; i++) {
+    const r = await requestOnce(cfg, messages, budget, REQ_TIMEOUTS_MS[i]);
+    if (r.starved) budget = Math.min(AI_TOKEN_BUDGET.max, budget * 2); // 思考烧光预算 → 放宽一倍再试
+    const d = digestReply(g, phase, seat, r.content);
+    if (d.chat) lastChat = d.chat;
+    if (d.action) return { chat: d.chat, action: d.action };
+  }
+  return { chat: phase === "wolf" ? lastChat : null, action: null }; // 两次皆败 → 调用方确定性回退
 }
 
 /* ---------- AI 设置：测试连接（短提示词探活，不走游戏流程） ---------- */

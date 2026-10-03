@@ -87,9 +87,11 @@ export function initTopbar() {
   onScroll();
 }
 
-/* ---------- 吸顶状态条倒计时（联机白天：行动超时 150s 倒数，§5.11） ----------
- * renderPhaseBanner 每次快照重渲染时重置 countdownAt；本 ticker 每秒只改
- * 倒计时 span 的文本，不做整屏重渲染。无倒计时（单机 / 夜里）时自解码为隐藏。 */
+/* ---------- 吸顶状态条倒计时（§5.11 行动超时 150s 倒数） ----------
+ * 白天全员可见（快照 deadline {at, seat}）；夜里仅行动者本人快照带 deadline
+ * （无泄漏），有则同样显示。renderPhaseBanner 每次快照重渲染时重置 countdownAt；
+ * 本 ticker 每秒只改倒计时 span 的文本，不做整屏重渲染。无倒计时（单机真人
+ * 行动 / 夜里非行动者）时自解码为隐藏。 */
 let countdownAt = null;
 let countdownEl = null;
 let countdownTicker = null;
@@ -200,7 +202,15 @@ function renderPhaseBanner(snap) {
   if (snap.phase === "night") {
     /* §4.1.6：夜里只露「第 N 夜」，不露子阶段与轮到谁 */
     box.append(iconEl("moon"), el("span", null, ` 第 ${snap.day} 夜`));
-    box.append(el("span", "phase-sub", snap.action ? "轮到你行动" : "夜晚进行中"));
+    const sub = el("span", "phase-sub", snap.action ? "轮到你行动" : "夜晚进行中");
+    /* 行动倒计时：夜里仅行动者本人的快照带 deadline（行动者本就知道轮到自己，无泄漏） */
+    if (snap.deadline && snap.deadline.at) {
+      sub.append(el("span", null, " · "));
+      const cd = el("span", "phase-countdown");
+      sub.append(cd);
+      armCountdown(cd, snap.deadline.at);
+    }
+    box.append(sub);
   } else if (snap.phase === "day") {
     box.append(iconEl("sun"), el("span", null, ` 第 ${snap.day} 天`));
     const sub = el("span", "phase-sub");

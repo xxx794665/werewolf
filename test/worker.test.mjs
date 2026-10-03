@@ -296,10 +296,16 @@ test('天亮齐跳：夜结算公布死者后全员 rev+1，白天子阶段与 p
   assert.equal(s.subPhase, 'lastwords');
   assert.equal(typeof s.pending, 'number', '白天待行动座位公开');
   assert.ok(s.events.some((e) => e.t === 'deaths' && e.seats.includes(victim)), '公开事件含死讯公告');
-  /* 白天透出行动倒计时（吸顶状态条数据源，§5.11）；夜里不透——seat 即轮到谁（§4.1.6） */
+  /* 白天透出行动倒计时（吸顶状态条数据源，§5.11）；夜里仅行动者本人可见——
+     deadline.seat 即轮到谁，透给非行动座位会泄漏夜里行动顺序（§4.1.6） */
   assert.ok(s.deadline && s.deadline.at > T0 + 220 && s.deadline.seat === s.pending, '白天快照带 deadline {at, seat}');
-  const nightSnap = logic.snapshotFor(room, 1);
-  assert.equal(nightSnap.deadline, undefined, '夜里快照不透 deadline');
+  const np = game.pendingSeat(room.game);
+  assert.ok(np != null, '夜里应有待行动座位');
+  assert.ok(logic.snapshotFor(room, np).deadline, '夜里行动者本人快照带 deadline（无泄漏）');
+  for (let seat = 1; seat <= 9; seat++) {
+    if (seat === np) continue;
+    assert.equal(logic.snapshotFor(room, seat).deadline, undefined, `夜里座位 ${seat}（非行动者）不透 deadline`);
+  }
 });
 
 test('越权与非法动作被拒：非本人座位 / 非房主代打 / AI 座位不认 uid 直投', () => {
@@ -493,6 +499,56 @@ test('parseWolfReply（§4.1.1 两行格式）：首行密聊、余行投票；�
   assert.deepEqual(logic.parseWolfReply(null), { chat: null, target: null });
 });
 
+test('死亡亮牌时机（§7.8 修订）：遗言提交前只见自己身份，提交后观战见全员；终局全亮', () => {
+  const { room } = newGame();
+  // 白盒构造：2 号被放逐、正轮到其留遗言（day:exile_lastwords 队列头 = 2）
+  const g = structuredClone(room.game);
+  g.phase = 'day';
+  g.day = 1;
+  g.subPhase = 'exile_lastwords';
+  g.queue = [2];
+  g.players[1].alive = false;
+  g.players[1].death = { day: 1, cause: 'exile' };
+  const shell = { ...room, game: g, deadline: null };
+  const during = logic.snapshotFor(shell, 2);
+  assert.equal(during.subPhase, 'exile_lastwords');
+  assert.ok(
+    during.players.every((p) => (p.seat === 2 ? p.role : p.role == null)),
+    '输入遗言时不亮他人身份（2026-10-03 试玩反馈定的时机）'
+  );
+  // 遗言提交后（队列走完进入发言）：观战视角见全员身份
+  g.subPhase = 'speak';
+  g.queue = [1, 3, 4, 5, 6, 7, 8, 9];
+  const after = logic.snapshotFor({ ...shell, game: g }, 2);
+  assert.ok(after.players.every((p) => p && p.role), '遗言提交后观战见全员身份');
+  // 终局不变：revealed 全亮（acceptance 另有全座位断言）
+});
+
+test('digestAIReply：解析 + 内核干跑校验——格式不合格 / 目标非法 action=null，合法通过', () => {
+  const { room } = newGame();
+  const wolf = game.pendingSeat(room.game); // 夜 1 狼阶段
+  const villager = seatsOfRole(room, 'villager')[0];
+  const ok = logic.digestAIReply(room.game, 'wolf', wolf, '听我口型，别露馅。\n' + villager);
+  assert.equal(ok.action.target, villager, '合法两行回复 → 动作通过干跑校验');
+  assert.equal(ok.chat, '听我口型，别露馅。');
+  const chatOnly = logic.digestAIReply(room.game, 'wolf', wolf, '先听队友的');
+  assert.equal(chatOnly.action, null, '有话没票 → 动作不可用（重试）');
+  assert.equal(chatOnly.chat, '先听队友的', '密聊内容保留');
+
+  // 投票阶段：死人目标 / 无数字 → action=null；空回复 → 全空
+  const g = structuredClone(room.game);
+  g.phase = 'day';
+  g.subPhase = 'vote';
+  g.votes = { round: 'main', cast: {} };
+  g.queue = [];
+  g.players[8].alive = false;
+  g.players[8].death = { day: 1, cause: 'blade' };
+  assert.ok(logic.digestAIReply(g, 'vote', 2, '投 3 号').action, '合法投票通过');
+  assert.equal(logic.digestAIReply(g, 'vote', 2, '9').action, null, '投已死座位 = 格式不合格（干跑校验拦截）');
+  assert.equal(logic.digestAIReply(g, 'vote', 2, '我还没想好').action, null, '无数字 = 解析失败');
+  assert.equal(logic.digestAIReply(g, 'vote', 2, '').action, null, '空回复不可用');
+});
+
 test('drive_ai 狼阶段（§4.1.1）：一次调用提交密聊 + 投票两段；上游失败回退只投票', async () => {
   const realFetch = globalThis.fetch;
   try {
@@ -558,6 +614,38 @@ test('drive_ai 狼阶段（§4.1.1）：一次调用提交密聊 + 投票两段�
     assert.equal(r2.via, 'fallback');
     assert.equal(room.room.game.night.wolfChat.length, 1, '回退不产生密聊');
     assert.equal(Object.keys(room.room.game.night.wolfVotes).length, 2, '回退投出一票');
+
+    // 重试（§8.4）：第一次请求抛错 → 第二次合法 → via='ai'，恰好 2 次尝试
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('flaky');
+      return new Response(JSON.stringify({ choices: [{ message: { content: '稳住，白天都听我的。\n4' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const r3 = await rpc('drive_ai', CFG);
+    assert.equal(r3.ok, true, JSON.stringify(r3));
+    assert.equal(r3.via, 'ai', '重试成功不走回退');
+    assert.equal(calls, 2, '失败后恰好重试 1 次');
+    assert.equal(room.room.game.night.wolfChat.length, 2, '重试成功密聊入账');
+
+    // 格式不合格（无数字无 skip）→ 重试后合法（此时狼已投完，轮到预言家 AI）
+    let step = 0;
+    globalThis.fetch = async () => {
+      step += 1;
+      const content = step === 1 ? '我还没想好' : '3';
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const r4 = await rpc('drive_ai', CFG);
+    assert.equal(r4.ok, true, JSON.stringify(r4));
+    assert.equal(r4.via, 'ai', '格式不合格重试后合法');
+    assert.equal(step, 2, '格式不合格恰好重试 1 次');
+    assert.equal(room.room.game.seerChecks.length, 1, '预言家验人入账');
   } finally {
     globalThis.fetch = realFetch;
   }
