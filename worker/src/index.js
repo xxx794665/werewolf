@@ -11,6 +11,9 @@
  *   GET  /api/room/:code/state  轮询快照（uid + rev 查询参数；无变化回 unchanged）
  *   POST /api/ai-proxy          AI 中转（请求侧在此，出站执行在 ai-proxy.js，
  *                               出站目标必过 url-guard——母本同款架构）
+ *   POST /api/ai-roster         AI 名册抽取：{ count } → [{ nick, persona }]
+ *                               （人格洗牌不重复 + 人格池网名，与身份无关，ADR-0009；
+ *                               联机开局由 DO 内部用同一份函数抽取，不经此接口）
  *   GET  /api/health            健康检查
  * CORS 只放行 ALLOWED_ORIGINS（[vars]）；房号字符集去易混 I/O/0/1（§7.1）。
  * DO 转发与命名空间绑定一律经 do-rpc.js（stub.fetch 官方 API，不出网络
@@ -21,6 +24,7 @@
 import { aiProxyLimited, buildProxyRequest, proxyFetch, UPSTREAM_TIMEOUT_MS, isDefaultAiUrl } from './ai-proxy.js';
 import { doRpc, roomStub } from './do-rpc.js';
 import { newRoomLimited } from './rate-limit.js';
+import { drawRoster } from '../../shared/roster.js';
 
 export { Room } from './room.js';
 export { resetRoomLimiterForTests } from './rate-limit.js';
@@ -28,6 +32,9 @@ export { resetRoomLimiterForTests } from './rate-limit.js';
 /* 6 位房号字符集：去易混 I / O / 0 / 1（features.md §7.1）。
    随机源用 crypto.getRandomValues（母本同款，非 Math.random）。 */
 const ROOM_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+/* [0,1) 浮点随机源（shared/roster.js drawRoster 注入用，与房号同款 crypto） */
+const cryptoRand = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
 const ROOM_ACT =
   'join|ready|start|speak|vote|wolf-chat|wolf-target|seer-check|witch-move|hunter-shoot|heartbeat|ai_view|drive_ai';
 
@@ -75,6 +82,22 @@ export default {
 
     if (path === '/api/health') {
       return reply({ ok: true, service: 'werewolf-room', at: Date.now() });
+    }
+
+    /* ---- AI 名册抽取（ADR-0009）：人格洗牌不重复 + 人格池网名，与身份无关。
+       纯计算零上游，不设限流；count 越界 / 缺失 → 400。 ---- */
+    if (path === '/api/ai-roster' && request.method === 'POST') {
+      let body = {};
+      try {
+        body = await request.json();
+      } catch (e) {
+        body = {};
+      }
+      try {
+        return reply({ ok: true, roster: drawRoster(body && body.count, cryptoRand) });
+      } catch (e) {
+        return reply({ error: 'BAD_REQUEST', message: String((e && e.message) || e) }, 400);
+      }
     }
 
     /* ---- 建房：限流 → 生成房号 → DO init ---- */

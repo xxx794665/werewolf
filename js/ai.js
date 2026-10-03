@@ -7,6 +7,8 @@
  *     effectiveConfig()（key 由 Worker Secret 注入，前端不接触凭据）
  *   - requestChat(messages)：唯一请求格式（§5.0）经 Worker /api/ai-proxy 转发
  *     （浏览器不直连上游，解 CORS）；30s 超时、失败重试 1 次（§8.4）
+ *   - fetchRoster(count)：AI 名册抽取（POST /api/ai-roster，超时/失败本地兜底，
+ *     ADR-0009）
  *   - parseReply(phase, text)：§5.1 宽容解析，归属本文件（§6 已知边界 3）
  *   - toHistory / windowHistory / roleCardOf / phaseOf：单机模式组装
  *     buildMessages(history, roleCard, phase) 的三个输入（§5.2 时序 2–4）
@@ -18,11 +20,15 @@
  * ============================================================ */
 
 import * as game from "../shared/game.js";
+import { drawRoster } from "../shared/roster.js";
 import { buildMessages, extractContent, clampMaxTokens, AI_TOKEN_BUDGET } from "./prompts.js";
 import { apiBase } from "./net.js";
 
 const REQ_TIMEOUT_MS = 90_000; // §8.4 单次请求超时（思考型模型流式出全文需 30–60s，30s 必超）
 const RETRY = 2; // 共尝试 2 次（失败重试 1 次）
+
+/* [0,1) 浮点随机源（shared/roster.js 本地兜底抽取用，与 net.js uid 同款 crypto） */
+const cryptoRand = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
 
 /* ---------- 内置体验通道（试用用户零配置可玩） ----------
  * baseUrl / model 非机密可进源码；API Key 存 Worker Secret（DEFAULT_AI_KEY），
@@ -69,6 +75,46 @@ export function saveConfig({ baseUrl, key, model, maxTokens }) {
 export function hasConfig() {
   const c = loadConfig();
   return !!(c.baseUrl && c.model); // 语义 = 用户自带配置（体验通道恒可用，见 effectiveConfig）
+}
+
+/* ---------- AI 名册（开局抽取人格 × 网名，ADR-0009） ----------
+ * 单机开局向 Worker /api/ai-roster 拉取（联机由 DO 开局时内部抽取，不经前端）。
+ * 接口不可达 / 超时 / 形状不对 → 本地用同一份池子兜底抽取——开局永不因此失败。
+ * 返回 [{ nick, persona }]（第 n 条对位第 n 个空座位，与内核 generateAISeats 对齐）。 */
+const ROSTER_TIMEOUT_MS = 3000; // 名册是装饰性数据，超时即兜底，不为它拖慢开局
+
+function validRosterEntry(e) {
+  if (!e || typeof e !== "object") return false;
+  const nick = typeof e.nick === "string" ? e.nick.trim() : "";
+  if (!nick || nick.length > 20) return false;
+  if (e.persona === undefined) return true;
+  const persona = typeof e.persona === "string" ? e.persona.trim() : "";
+  return persona.length > 0 && persona.length <= 120;
+}
+
+export async function fetchRoster(count) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), ROSTER_TIMEOUT_MS);
+    let r;
+    try {
+      const res = await fetch(apiBase() + "/api/ai-roster", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ count }),
+        signal: ctrl.signal,
+      });
+      r = await res.json();
+    } finally {
+      clearTimeout(t);
+    }
+    if (r && r.ok && Array.isArray(r.roster) && r.roster.length === count && r.roster.every(validRosterEntry)) {
+      return r.roster;
+    }
+  } catch (e) {
+    /* 断网 / 超时 / 形状不对 → 本地兜底 */
+  }
+  return drawRoster(count, cryptoRand);
 }
 
 /* ---------- AI 请求（§5.0 唯一格式 + §5.2 信封） ---------- */
@@ -309,6 +355,9 @@ export function roleCardOf(g, seat) {
   const p = g.players[seat - 1];
   if (!p) return null;
   const card = { seat, role: PROMPT_ROLE[p.role] || p.role };
+  /* 公开层（ADR-0009）：全员昵称对照 + 本人 AI 人格（风格层，与身份无关） */
+  card.roster = g.players.filter(Boolean).map((x) => ({ seat: x.seat, nick: x.nick }));
+  if (p.persona) card.persona = p.persona;
   if (p.role === "werewolf") {
     card.wolves = g.players.filter((x) => x && x.role === "werewolf").map((x) => x.seat);
     if (g.phase === "night" && g.subPhase === "wolf" && g.night) {

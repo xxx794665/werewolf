@@ -184,6 +184,44 @@ test("每座位口吻确定性轮换（同座位两次组装一致，不同座�
   assert.notEqual(a1, b);
 });
 
+test("口吻人格：roleCard.persona 优先（ADR-0009 开局名册抽取），未带时回退座位轮换", () => {
+  const a = buildMessages([], { seat: 2, role: "villager", persona: PERSONAS[5] }, "speak")[0].content;
+  assert.ok(a.includes("【你的口吻】" + PERSONAS[5]), "注入的人格原文进 system 消息");
+  const fallback = buildMessages([], { seat: 2, role: "villager" }, "speak")[0].content;
+  assert.ok(fallback.includes("【你的口吻】" + PERSONAS[1]), "未带 persona 回退座位轮换（旧存档兼容）");
+  assert.throws(() => buildMessages([], { seat: 2, role: "villager", persona: "" }, "speak"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 2, role: "villager", persona: "超".repeat(121) }, "speak"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 2, role: "villager", persona: 7 }, "speak"), /prompts:/);
+});
+
+test("玩家名录：座位↔昵称进上下文，昵称消毒防破栏；身份行带本人昵称", () => {
+  const roster = [
+    { seat: 1, nick: "甲" },
+    { seat: 2, nick: '坏「nick」\n第二行<x>' }, // 换行 / 引号 / 尖括号都要消毒
+    { seat: 3, nick: "我" },
+  ];
+  const msgs = buildMessages(sampleHistory(), { seat: 3, role: "villager", roster }, "speak");
+  const user = msgs[1].content;
+  const rosterLine = user.split("\n").find((l) => l.includes("【玩家名录】"));
+  assert.ok(rosterLine, "名录行在场");
+  assert.ok(user.includes('1号「甲」'));
+  assert.ok(user.includes('2号「坏nick第二行x」'), "消毒后不留换行、引号与尖括号");
+  assert.ok(user.includes('3号「我」'));
+  assert.ok(msgs[0].content.includes("你是 3 号（昵称「我」）"), "身份行带本人昵称");
+  // 消毒后为空的昵称只报座位号
+  const m2 = buildMessages([], { seat: 1, role: "villager", roster: [{ seat: 2, nick: "「」" }] }, "speak");
+  const line2 = m2[1].content.split("\n").find((l) => l.includes("【玩家名录】"));
+  assert.ok(line2.includes("2号、") === false && line2.includes("2号"));
+  // 超长昵称截断到 20（真人昵称内核不限长，prompts 层兜底）
+  const m3 = buildMessages([], { seat: 1, role: "villager", roster: [{ seat: 2, nick: "长".repeat(30) }] }, "speak");
+  assert.ok(m3[1].content.includes("长".repeat(20)));
+  // 非法 roster 抛错
+  assert.throws(() => buildMessages([], { seat: 1, role: "villager", roster: "x" }, "speak"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 1, role: "villager", roster: [{ seat: 0, nick: "x" }] }, "speak"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 1, role: "villager", roster: [{ seat: 2, nick: 5 }] }, "speak"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 1, role: "villager", roster: [{ seat: 2 }] }, "speak"), /prompts:/);
+});
+
 test("非法输入抛错（调用方按 features.md §8.4 走确定性回退）", () => {
   assert.throws(() => buildMessages([], { seat: 0, role: "villager" }, "speak"), /prompts:/);
   assert.throws(() => buildMessages([], { seat: 3, role: "god" }, "speak"), /prompts:/);

@@ -19,11 +19,23 @@ import assert from 'node:assert/strict';
 
 import * as game from '../shared/game.js';
 import { buildMessages } from '../shared/prompts.js';
+import { drawRoster } from '../shared/roster.js';
 import * as ai from '../js/ai.js';
 import * as logic from '../worker/src/room-logic.js';
 import { checkUrl } from '../worker/src/url-guard.js';
 import worker, { resetRoomLimiterForTests } from '../worker/src/index.js';
 import { Room } from '../worker/src/room.js';
+
+/** 种子伪随机源（[0,1)），开局名册抽取用，可复现。 */
+function seeded(seed) {
+  let s = seed | 0;
+  return () => {
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 const ROLE_NAME = { wolf: '狼人', villager: '平民', seer: '预言家', witch: '女巫', hunter: '猎人' };
 
@@ -69,21 +81,32 @@ function assertNoLeak(req) {
   // 历史只含公开事件 schema（§1.3），死因 / 他人身份等字段不存在
   history.forEach((ev, i) => assertPublicHistory(ev, `${label} history[${i}]`));
 
-  // 身份行：只有本人（“你是 N 号，X（阵营）”）
+  // 身份行：只有本人（“你是 N 号（昵称「…」），X（阵营）”；昵称是开局名册抽取的公开网名）
   assert.ok(
-    messages[0].content.includes(`你是 ${seat} 号，${ROLE_NAME[card.role]}（`),
+    messages[0].content.includes(`你是 ${seat} 号`) && messages[0].content.includes(`${ROLE_NAME[card.role]}（`),
     `${label}: system 必须含本人身份行`
   );
   for (let k = 1; k <= 9; k++) {
     if (k !== seat) assert.ok(!combined.includes(`你是 ${k} 号`), `${label}: 出现 ${k} 号的身份行，疑泄密`);
   }
 
+  // 公开层（ADR-0009）：名录必须等于真实座位昵称对照；persona 必须是本人开局抽取值
+  assert.deepEqual(
+    card.roster,
+    state.players.filter(Boolean).map((p) => ({ seat: p.seat, nick: p.nick })),
+    `${label}: 名录必须等于真实座位昵称对照`
+  );
+  if ('persona' in card) {
+    assert.equal(card.persona, state.players[seat - 1].persona, `${label}: persona 必须等于本人开局抽取值`);
+  }
+
   // roleCard 角色白名单 + 私有信息与真实内核状态一致（合法私有信息必须是真的）
+  // roster（全员昵称对照）与 persona（AI 言行风格）是公开层字段（ADR-0009），与身份无关
   const keys = Object.keys(card).sort();
   if (card.role === 'wolf') {
     // §4.1.1：狼阶段额外带密聊 / 投票 / 队长（均属狼座合法私有视角）
     assert.ok(
-      keys.every((k) => ['role', 'seat', 'wolves', 'wolfChat', 'wolfVotes', 'captain'].includes(k)),
+      keys.every((k) => ['role', 'seat', 'wolves', 'wolfChat', 'wolfVotes', 'captain', 'roster', 'persona'].includes(k)),
       `${label}: 狼身份卡字段越界：${keys.join(',')}`
     );
     const actual = state.players.filter((p) => p && p.role === 'werewolf').map((p) => p.seat);
@@ -105,14 +128,14 @@ function assertNoLeak(req) {
       assert.notEqual(phase, 'wolf', `${label}: 狼阶段身份卡必须携带密聊频道`);
     }
   } else if (card.role === 'seer') {
-    assert.deepEqual(keys, ['checks', 'role', 'seat'], `${label}: 预言家身份卡字段越界`);
+    assert.deepEqual(keys, ['checks', 'persona', 'role', 'roster', 'seat'], `${label}: 预言家身份卡字段越界`);
     for (const c of card.checks) {
       const actualRole = state.players[c.seat - 1].role;
       assert.equal(c.result, actualRole === 'werewolf' ? 'wolf' : 'good', `${label}: 验人结果必须与真实身份一致`);
     }
   } else if (card.role === 'witch') {
     assert.ok(
-      keys.every((k) => ['seat', 'role', 'antidote', 'poison', 'knifeTarget'].includes(k)),
+      keys.every((k) => ['seat', 'role', 'antidote', 'poison', 'knifeTarget', 'roster', 'persona'].includes(k)),
       `${label}: 女巫身份卡字段越界`
     );
     if ('knifeTarget' in card) {
@@ -121,7 +144,7 @@ function assertNoLeak(req) {
       assert.equal(card.knifeTarget, state.night && state.night.blade, `${label}: 刀口必须是当夜真实刀口`);
     }
   } else {
-    assert.deepEqual(keys, ['role', 'seat'], `${label}: 平民 / 猎人身份卡只允许座位与角色`);
+    assert.deepEqual(keys, ['persona', 'role', 'roster', 'seat'], `${label}: 平民 / 猎人身份卡只允许座位与角色 + 公开层`);
   }
 
   // 跨角色私密信息探针：他人可见内容里绝不出现别的角色的私有渲染
@@ -177,11 +200,22 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
   try {
     let s = game.advance(game.createInitialState(), { type: 'join', nick: '独行', uid: 'u-solo' }).state;
     s = game.advance(s, { type: 'ready', seat: 1, ready: true }).state;
-    const started = game.advance(s, { type: 'start', seed: 20261003, solo: true });
+    /* 开局名册（ADR-0009）：固定种子抽取，AI 网名与人格走完整链路 */
+    const roster = drawRoster(8, seeded(20261003));
+    const started = game.advance(s, { type: 'start', seed: 20261003, solo: true, roster });
     assert.equal(started.error, null, `solo 开局不应失败：${started.error}`);
     s = started.state;
     assert.equal(s.players.filter(Boolean).length, 9, '原子补 AI 到 9 人');
     assert.equal(s.players.filter((p) => p && p.isAI).length, 8, '1 真人 + 8 AI');
+    assert.deepEqual(
+      s.players.filter((p) => p.isAI).map((p) => p.nick),
+      roster.map((e) => e.nick),
+      'AI 座位网名按补位顺序对位名册'
+    );
+    assert.ok(
+      s.players.filter((p) => p.isAI).every((p, i) => p.persona === roster[i].persona),
+      'AI 座位 persona 按名册对位'
+    );
     assert.equal(s.phase, 'night');
     assert.equal(s.subPhase, 'wolf');
 

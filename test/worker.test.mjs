@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { checkUrl } from '../worker/src/url-guard.js';
 import * as logic from '../worker/src/room-logic.js';
 import * as game from '../shared/game.js';
+import { PERSONAS } from '../shared/prompts.js';
 import { buildProxyRequest, proxyFetch, aiProxyLimited, resetRateLimiterForTests, isDefaultAiUrl, DEFAULT_AI_BASE } from '../worker/src/ai-proxy.js';
 import worker, { resetRoomLimiterForTests } from '../worker/src/index.js';
 import { Room } from '../worker/src/room.js';
@@ -858,4 +859,59 @@ test('体验通道：默认上游且无 key → 注入 Secret；自带 key 原�
   assert.equal(seen[0].auth, 'Bearer test-injected-key', '无 key + 默认上游 → 注入 Secret');
   assert.equal(seen[1].auth, 'Bearer mine', '自带 key 原样透传，不覆盖');
   assert.equal(seen[2].auth, null, '他域永不注入，Bearer 不外带');
+});
+
+/* ---------------- AI 名册（ADR-0009）：/api/ai-roster 与 DO 开局内部抽取 ---------------- */
+
+test('/api/ai-roster：按 count 抽取人格 × 网名（不重复、与身份无关），越界 400', async () => {
+  const env = makeEnv();
+  const ip = { 'cf-connecting-ip': '9.9.9.9' };
+  const res = await worker.fetch(post('/api/ai-roster', { count: 8 }, ip), env);
+  assert.equal(res.status, 200);
+  const data = await res.json();
+  assert.equal(data.ok, true);
+  assert.equal(data.roster.length, 8);
+  assert.equal(new Set(data.roster.map((e) => e.persona)).size, 8, '人格一局不重复');
+  assert.equal(new Set(data.roster.map((e) => e.nick)).size, 8, '网名全局唯一');
+  for (const e of data.roster) {
+    assert.ok(PERSONAS.includes(e.persona), '人格出自 PERSONAS');
+    assert.equal(typeof e.nick, 'string');
+    assert.ok(e.nick.length >= 1 && e.nick.length <= 20);
+  }
+  for (const bad of [{ count: 9 }, { count: -1 }, { count: 'x' }, {}]) {
+    const r = await worker.fetch(post('/api/ai-roster', bad, ip), env);
+    assert.equal(r.status, 400, `count=${JSON.stringify(bad.count)} 应 400`);
+  }
+});
+
+test('路由集成：DO 开局内部抽名册 → AI 座位带池内网名与 persona；快照不透出 persona', async () => {
+  const env = makeEnv();
+  const ip = { 'cf-connecting-ip': '8.8.4.4' };
+  resetRoomLimiterForTests();
+  const code = (await (await worker.fetch(post('/api/room/new', { nick: '甲', uid: 'u1' }, ip), env)).json()).code;
+  await worker.fetch(post(`/api/room/${code}/join`, { nick: '乙', uid: 'u2' }, ip), env);
+  await worker.fetch(post(`/api/room/${code}/join`, { nick: '丙', uid: 'u3' }, ip), env);
+  for (const uid of ['u1', 'u2', 'u3']) {
+    await worker.fetch(post(`/api/room/${code}/ready`, { uid, ready: true }, ip), env);
+  }
+  const started = await worker.fetch(post(`/api/room/${code}/start`, { uid: 'u1' }, ip), env);
+  assert.equal(started.status, 200);
+
+  // ai_view（owner 专属）能看到该 AI 座位的网名、persona 与全员名录
+  const snap = await (await worker.fetch(get(`/api/room/${code}/state?uid=u1`, ip), env)).json();
+  const aiSeat = snap.players.find((p) => p.isAI).seat;
+  const view = (await (await worker.fetch(post(`/api/room/${code}/ai_view`, { uid: 'u1', seat: aiSeat }, ip), env)).json()).view;
+  assert.ok(view.nick && view.nick !== `AI-${aiSeat}`, 'AI 座位网名来自名册而非默认 AI-n');
+  assert.equal(typeof view.persona, 'string', 'ai_view 带 persona（AI 提示词用）');
+  assert.ok(Array.isArray(view.roster) && view.roster.length === 9, 'roleCard 带全员昵称对照');
+  assert.ok(view.roster.every((e) => typeof e.nick === 'string' && e.nick.length > 0));
+
+  // 快照（安全边界）：昵称公开可透，persona 绝不透出
+  const aiEntry = snap.players.find((p) => p.seat === aiSeat);
+  assert.equal(aiEntry.nick, view.nick, '快照昵称与名册一致');
+  assert.equal('persona' in aiEntry, false, '快照不透出 persona');
+  for (const seat of [2, 3]) {
+    const other = await (await worker.fetch(get(`/api/room/${code}/state?uid=u${seat}`, ip), env)).json();
+    assert.equal('persona' in other.players.find((p) => p.isAI), false, '任何座位快照都不带 persona');
+  }
 });

@@ -17,6 +17,7 @@
 
 import * as logic from './room-logic.js';
 import * as game from '../../shared/game.js';
+import { drawRoster } from '../../shared/roster.js';
 import { checkUrl } from './url-guard.js';
 import { proxyFetch, UPSTREAM_TIMEOUT_MS, isDefaultAiUrl } from './ai-proxy.js';
 import { extractContent, AI_TOKEN_BUDGET } from '../../shared/prompts.js';
@@ -35,6 +36,9 @@ const ROOM_ACTIONS = [
 function randomSeed() {
   return crypto.getRandomValues(new Uint32Array(1))[0] | 0; // §3 开局均匀随机（DO 侧 crypto）
 }
+
+/* [0,1) 浮点随机源（shared/roster.js drawRoster 注入用，DO 侧 crypto） */
+const cryptoRand = () => crypto.getRandomValues(new Uint32Array(1))[0] / 4294967296;
 
 export class Room {
   constructor(ctx, env) {
@@ -129,6 +133,12 @@ export class Room {
         const out = logic.applyAction(room, action, body, {
           now,
           seed: action === 'start' ? randomSeed() : undefined,
+          // ADR-0009：开局名册（AI 人格 × 网名，与身份无关）在 DO 内部抽取，
+          // 与 seed 同模式经 ctx 注入，不经客户端中转
+          roster:
+            action === 'start'
+              ? drawRoster(room.game.players.filter((p) => !p).length, cryptoRand)
+              : undefined,
         });
         if (out.error) return json({ error: 'ACTION_REJECTED', message: out.error }, 400);
         if (out.persist !== false) {

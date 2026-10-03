@@ -29,8 +29,10 @@ werewolf/
 │   ├── game.js             # 玩法内核纯函数：advance（join/ready/start/夜行动/发言/投票）、
 │   │                       #   applyFallback（确定性回退）、pendingSeat、wolfCaptain、checkWinner、
 │   │                       #   generateAISeats、witchSeesBlade；零 I/O 零时钟零随机（种子进 state）
-│   └── prompts.js          # 角色提示词 + buildMessages(history, roleCard, phase)：
-│                           #   恒两条消息、私有字段按角色白名单渲染（防泄密的结构层边界）
+│   ├── prompts.js          # 角色提示词 + buildMessages(history, roleCard, phase)：
+│   │                       #   恒两条消息、私有字段按角色白名单渲染（防泄密的结构层边界）
+│   └── roster.js           # AI 开局名册（ADR-0009）：人格 × 网名池 + drawRoster（rand 注入
+│                           #   纯函数）；worker 接口 / DO 开局 / 浏览器兜底共用同一份池子
 ├── worker/                 # Cloudflare Workers 后端（部署边界，无 package.json，仅靠 wrangler.toml）
 │   ├── wrangler.toml       # name=werewolf-room、DO 绑定 ROOM、SQLite 迁移、ALLOWED_ORIGINS、observability
 │   └── src/

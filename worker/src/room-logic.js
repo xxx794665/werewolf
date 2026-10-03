@@ -366,7 +366,9 @@ export function applyAction(room, httpAction, body, ctx) {
     case 'start': {
       if (body.uid !== room.ownerUid) return { error: '仅房主可以开始游戏' };
       if (!Number.isInteger(ctx.seed)) return { error: '缺少发牌种子' };
-      const r = game.advance(room.game, { type: 'start', seed: ctx.seed });
+      /* roster = DO 壳用 shared/roster.js 抽好的开局名册（人格 × 网名，与身份无关，
+         ADR-0009）；缺席时内核回退默认昵称 AI-n（部署过渡 / 旧调用方兼容） */
+      const r = game.advance(room.game, { type: 'start', seed: ctx.seed, roster: ctx.roster });
       if (r.error) return { error: r.error };
       const draft = clone(room);
       draft.game = r.state;
@@ -406,6 +408,10 @@ export function roleCardOf(g, seat) {
   const p = g.players[seat - 1];
   if (!p) return null;
   const card = { seat, role: PROMPT_ROLE[p.role] || p.role };
+  /* 公开层（ADR-0009）：全员昵称对照进卡——AI 需要知道名录才能被称呼；
+   * 本人 persona（开局名册抽取的言行风格，非身份信息）只对 AI 座位存在 */
+  card.roster = g.players.filter(Boolean).map((x) => ({ seat: x.seat, nick: x.nick }));
+  if (p.persona) card.persona = p.persona;
   if (p.role === 'werewolf') {
     card.wolves = g.players.filter((x) => x && x.role === 'werewolf').map((x) => x.seat);
     if (g.phase === 'night' && g.subPhase === 'wolf' && g.night) {

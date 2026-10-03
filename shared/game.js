@@ -23,8 +23,10 @@
  *   phase: 'lobby' | 'night' | 'day' | 'revealed'
  *   subPhase: 夜 'wolf'|'seer'|'witch'；昼 'night_hunter'|'lastwords'|
  *     'speak'|'vote'|'pk_speak'|'pk_vote'|'exile_lastwords'|'hunter'
- *   players[9]: { seat, nick, uid, isAI, ready, role, alive, death? }
+ *   players[9]: { seat, nick, uid, isAI, ready, role, alive, death?, persona? }
  *     death = { day, cause: 'blade'|'poison'|'shot'|'exile' }（复盘用）
+ *     persona = AI 座位的言行风格描述（开局名册抽取，shared/roster.js；
+ *     只进 AI 提示词，快照按座位裁剪后不透出，ADR-0009）
  *   rng: mulberry32 状态（发牌洗牌与确定性回退共用，测试可复现）
  *   night: 当夜瞬时 { blade, saved, poison, wolfChat, wolfVotes }，天亮结算后清空
  *     （wolfChat = 狼队密聊记录、wolfVotes = 狼队定刀投票，仅狼座快照可见，§4.1.5）
@@ -142,18 +144,55 @@ export function witchSeesBlade(state) {
 }
 
 /**
- * §7.4 / §7.5 AI 补位：空座位按座位升序补 AI，昵称 AI-1…AI-8 按
- * 补位顺序分配（昵称即公开标识是 AI）。纯函数，供 start 与房主确认弹窗预估共用。
+ * §7.4 / §7.5 AI 补位：空座位按座位升序补 AI。roster（可选）= 开局名册
+ * （shared/roster.js 抽取的 { nick, persona? }，worker 接口或 DO 内部抽取），
+ * 第 n 条对位第 n 个空座位；缺条目的座位回退默认昵称 AI-n、不带人格
+ * （昵称与人格只贴人格池、与身份无关，ADR-0009）。纯函数，供 start 共用。
  */
-export function generateAISeats(players) {
+export function generateAISeats(players, roster) {
   const seats = [];
   let n = 0;
   for (let i = 0; i < players.length; i++) {
     if (players[i]) continue;
+    const r = roster && roster[n];
     n += 1;
-    seats.push({ seat: i + 1, nick: `AI-${n}`, uid: `ai:${i + 1}`, isAI: true, ready: true, role: null, alive: true });
+    seats.push({
+      seat: i + 1,
+      nick: r && r.nick ? r.nick : `AI-${n}`,
+      uid: `ai:${i + 1}`,
+      isAI: true,
+      ready: true,
+      role: null,
+      alive: true,
+      ...(r && r.persona ? { persona: r.persona } : null),
+    });
   }
   return seats;
+}
+
+/**
+ * §7.5 开局名册校验（start 动作可选字段 roster）：数组，每条 { nick, persona? }。
+ * 严进：形状不对直接拒绝开局（调用方 = worker / DO / 本模块自身兜底，是可信
+ * 数据源；缺字段回退由 generateAISeats 处理，这里不静默降级）。
+ */
+function validateRoster(state, roster) {
+  if (!Array.isArray(roster)) return fail(state, 'roster 必须是数组');
+  if (roster.length > SEAT_COUNT - 1) return fail(state, `roster 最多 ${SEAT_COUNT - 1} 条`);
+  const out = [];
+  for (let i = 0; i < roster.length; i++) {
+    const e = roster[i];
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return fail(state, `roster[${i}] 必须是对象`);
+    const nick = typeof e.nick === 'string' ? e.nick.trim() : '';
+    if (!nick || nick.length > 20) return fail(state, `roster[${i}].nick 必须是 1–20 字`);
+    if (e.persona === undefined) {
+      out.push({ nick });
+      continue;
+    }
+    const persona = typeof e.persona === 'string' ? e.persona.trim() : '';
+    if (!persona || persona.length > 120) return fail(state, `roster[${i}].persona 必须是 1–120 字`);
+    out.push({ nick, persona });
+  }
+  return out;
 }
 
 /** 当前待行动座位（UI 提示「轮到你」与 DO 150s 超时兜底共用；投票阶段返回首个未投者）。 */
@@ -254,7 +293,13 @@ function hStart(state, a) {
   const minHumans = a.solo === true ? 1 : MIN_HUMANS;
   if (humans.length < minHumans) return fail(state, `真人不足 ${MIN_HUMANS} 人，无法开桌`); // §7.4 最小开桌数
   if (humans.some((p) => !p.ready)) return fail(state, '仍有真人未准备'); // §7.4 start 时重校验
-  for (const ai of generateAISeats(s.players)) s.players[ai.seat - 1] = ai; // 补位到 9
+  // §7.5 开局名册（可选）：AI 昵称与人格按补位顺序对位，与发牌身份无关（ADR-0009）
+  let roster = null;
+  if (a.roster !== undefined && a.roster !== null) {
+    roster = validateRoster(state, a.roster);
+    if (!Array.isArray(roster)) return roster; // 校验失败 = fail(state, msg)
+  }
+  for (const ai of generateAISeats(s.players, roster)) s.players[ai.seat - 1] = ai; // 补位到 9
   // §3 开局均匀随机洗牌发牌（带种子，测试可复现）
   const deck = [];
   for (const [role, n] of Object.entries(BOARD)) for (let i = 0; i < n; i++) deck.push(role);

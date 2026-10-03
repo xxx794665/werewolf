@@ -8,6 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as game from '../shared/game.js';
+import { PERSONAS } from '../shared/prompts.js';
 
 const adv = (s, a) => game.advance(s, a);
 const at = (s, seat) => s.players[seat - 1];
@@ -604,6 +605,60 @@ test('AI 补位：空位按座位序补 AI-1…；最小开桌 3 真人，不足
   const three = newRoom(['张三', '李四', '王五'], 42);
   assert.equal(three.state.players.filter((p) => p.isAI).length, 6);
   assert.equal(three.state.players.filter((p) => !p.isAI).length, 3);
+});
+
+/* ---------------- 开局名册（§7.5 / ADR-0009）：AI 网名与人格 ---------------- */
+
+test('开局名册：AI 昵称与人格按补位顺序对位，与发牌身份无关；缺条目回退 AI-n', () => {
+  const roster = [
+    { nick: '逻辑闭环怪', persona: PERSONAS[0] },
+    { nick: '先投为敬' }, // 无 persona：合法，座位不带人格
+  ];
+  const s0 = game.advance(game.createInitialState(), { type: 'join', nick: '我', uid: 'u1' }).state;
+  const s = adv(s0, { type: 'ready', seat: 1, ready: true }).state;
+  const r = adv(s, { type: 'start', seed: 42, solo: true, roster });
+  assert.equal(r.error, null);
+  const ais = r.state.players.filter((p) => p.isAI);
+  assert.deepEqual(ais.map((p) => p.nick), ['逻辑闭环怪', '先投为敬', 'AI-3', 'AI-4', 'AI-5', 'AI-6', 'AI-7', 'AI-8']);
+  assert.equal(ais[0].persona, PERSONAS[0]);
+  assert.equal(ais[1].persona, undefined);
+  assert.ok(ais.slice(2).every((p) => p.persona === undefined), '回退座位不带人格');
+  // 网名与人格只贴人格池、与身份无关：同一座位抽什么身份都带同一个网名
+  const rolesA = r.state.players.map((p) => p.role);
+  const r2 = adv(s, { type: 'start', seed: 43, solo: true, roster }).state;
+  assert.equal(r2.players[1].nick, '逻辑闭环怪');
+  assert.notDeepEqual(r2.players.map((p) => p.role), rolesA, '种子不同发牌不同');
+  // game_start 公开事件带新网名（不含 role / persona，暗牌口径不变）
+  const startEv = r.events.find((e) => e.type === 'game_start');
+  assert.equal(startEv.players[1].nick, '逻辑闭环怪');
+  assert.ok(startEv.players.every((p) => !('role' in p) && !('persona' in p)));
+});
+
+test('开局名册：形状非法严进拒绝开局（不静默降级）；省略 roster 走默认 AI-n（部署过渡）', () => {
+  const base = game.advance(game.createInitialState(), { type: 'join', nick: '我', uid: 'u1' }).state;
+  const ready = adv(base, { type: 'ready', seat: 1, ready: true }).state;
+  const bad = [
+    { roster: 'x', why: '非数组' },
+    { roster: [{ nick: '' }], why: '空昵称' },
+    { roster: [{ nick: '超'.repeat(21) }], why: '昵称超长' },
+    { roster: [{ nick: '甲', persona: '' }], why: '空人格' },
+    { roster: [{ nick: '甲', persona: '超'.repeat(121) }], why: '人格超长' },
+    { roster: [{ nick: '甲' }, 'x'], why: '条目非对象' },
+    { roster: new Array(9).fill({ nick: '甲' }), why: '超过 8 条' },
+  ];
+  for (const { roster, why } of bad) {
+    const r = adv(ready, { type: 'start', seed: 42, solo: true, roster });
+    assert.notEqual(r.error, null, `非法名册应拒绝开局：${why}`);
+    assert.equal(r.state, ready, '拒绝时状态原样返回');
+  }
+  // 不带 roster → 默认昵称（旧调用方 / 部署过渡兼容），无 persona
+  const plain = adv(ready, { type: "start", seed: 42, solo: true });
+  assert.equal(plain.error, null);
+  assert.deepEqual(
+    plain.state.players.filter((p) => p.isAI).map((p) => p.nick),
+    ['AI-1', 'AI-2', 'AI-3', 'AI-4', 'AI-5', 'AI-6', 'AI-7', 'AI-8']
+  );
+  assert.ok(plain.state.players.every((p) => p.persona === undefined));
 });
 
 /* ---------------- 狼队长（§5.1） ---------------- */

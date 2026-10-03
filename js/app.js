@@ -128,12 +128,19 @@ function soloSnap() {
   return s;
 }
 
-function startSolo(nick) {
+async function startSolo(nick) {
   const uid = net.me().uid;
   let r = game.advance(game.createInitialState(), { type: "join", nick, uid });
   if (r.error) return ui.toast(r.error);
   r = game.advance(r.state, { type: "ready", seat: 1, ready: true });
-  r = game.advance(r.state, { type: "start", seed: crypto.getRandomValues(new Uint32Array(1))[0] | 0, solo: true });
+  /* AI 名册（人格 × 网名，与身份无关，ADR-0009）：Worker 抽取，3s 超时本地兜底 */
+  const roster = await ai.fetchRoster(8);
+  r = game.advance(r.state, {
+    type: "start",
+    seed: crypto.getRandomValues(new Uint32Array(1))[0] | 0,
+    solo: true,
+    roster,
+  });
   if (r.error) return ui.toast(r.error);
   mode = "solo";
   solo = { state: r.state, log: [], driving: false };

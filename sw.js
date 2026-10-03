@@ -11,7 +11,7 @@
  *   新增 / 删除模块或资源时同步更新 SHELL 清单并 +1。
  * ============================================================ */
 
-const CACHE = "werewolf-v10";
+const CACHE = "werewolf-v11";
 
 const SHELL = [
   "./",
@@ -19,6 +19,7 @@ const SHELL = [
   "./style.css",
   "./manifest.webmanifest",
   "./shared/prompts.js",
+  "./shared/roster.js",
   "./shared/game.js",
   "./js/prompts.js",
   "./js/net.js",
