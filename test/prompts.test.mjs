@@ -168,6 +168,8 @@ test("九个阶段全部可组装；遗言/开枪阶段标注出局", () => {
   }
   const lw = buildMessages(sampleHistory(), cards.villager, "lastwords");
   assert.ok(lw[1].content.includes("你已出局"));
+  assert.ok(lw[1].content.includes("禁止弃权"), "遗言任务须禁弃权（防「先过，看看后面发言再说」式敷衍）");
+  assert.ok(lw[1].content.includes("首夜就被杀"), "遗言任务须含首夜死基础信息指引");
   const hu = buildMessages(sampleHistory(), cards.villager, "hunter");
   assert.ok(hu[1].content.includes("翻牌开枪"));
 });

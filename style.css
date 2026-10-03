@@ -241,8 +241,22 @@ input {
 .seat-dead { opacity: 0.55; }
 .seat-dead .seat-nick { text-decoration: line-through; }
 
-/* ---------- 阶段条（icon + 文案 + 子阶段） ---------- */
-.phase-banner { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* ---------- 阶段条（icon + 文案 + 子阶段 + 轮到谁 + 倒计时） ----------
+ * 吸顶在顶栏正下方随页面滚动（--topbar-h 由 js/ui.js initTopbar 实测写入），
+ * 像常驻 toast：对局进行中任何时候抬头可见阶段 / 行动方 / 剩余时间 */
+.phase-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  position: sticky;
+  top: var(--topbar-h, 44px);
+  z-index: 9;
+  margin: 0 0 12px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  backdrop-filter: blur(6px);
+}
+.phase-countdown { font-variant-numeric: tabular-nums; color: var(--accent); }
 .phase-sub { margin-left: auto; font-size: 13px; color: var(--muted); font-weight: 400; flex-shrink: 0; }
 
 /* ---------- 身份卡（我的角色 + 合法私有信息） ---------- */

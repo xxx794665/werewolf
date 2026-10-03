@@ -75,9 +75,40 @@ export function setSubtitle(text) {
 export function initTopbar() {
   const bar = $("topbar");
   if (!bar) return;
-  const onScroll = () => bar.classList.toggle("is-collapsed", window.scrollY > 60);
+  /* 吸顶状态条的 top 偏移跟随顶栏实际高度（收拢时变矮），写入 CSS 变量 */
+  const syncHeight = () =>
+    document.documentElement.style.setProperty("--topbar-h", bar.offsetHeight + "px");
+  const onScroll = () => {
+    bar.classList.toggle("is-collapsed", window.scrollY > 60);
+    syncHeight();
+  };
   window.addEventListener("scroll", onScroll, { passive: true });
+  window.addEventListener("resize", syncHeight);
   onScroll();
+}
+
+/* ---------- 吸顶状态条倒计时（联机白天：行动超时 150s 倒数，§5.11） ----------
+ * renderPhaseBanner 每次快照重渲染时重置 countdownAt；本 ticker 每秒只改
+ * 倒计时 span 的文本，不做整屏重渲染。无倒计时（单机 / 夜里）时自解码为隐藏。 */
+let countdownAt = null;
+let countdownEl = null;
+let countdownTicker = null;
+
+function tickCountdown() {
+  if (!countdownEl || !countdownEl.isConnected) {
+    countdownEl = null;
+    countdownAt = null;
+    return;
+  }
+  const left = Math.max(0, Math.ceil((countdownAt - Date.now()) / 1000));
+  countdownEl.textContent = left > 0 ? `剩 ${left} 秒` : "结算中…";
+}
+
+function armCountdown(span, endsAt) {
+  countdownEl = span;
+  countdownAt = endsAt;
+  if (!countdownTicker) countdownTicker = setInterval(tickCountdown, 1000);
+  tickCountdown();
 }
 
 /* ---------- toast（位移入场，禁 from-opacity） ---------- */
@@ -172,7 +203,20 @@ function renderPhaseBanner(snap) {
     box.append(el("span", "phase-sub", snap.action ? "轮到你行动" : "夜晚进行中"));
   } else if (snap.phase === "day") {
     box.append(iconEl("sun"), el("span", null, ` 第 ${snap.day} 天`));
-    box.append(el("span", "phase-sub", SUBPHASE_NAME[snap.subPhase] || ""));
+    const sub = el("span", "phase-sub");
+    const parts = [SUBPHASE_NAME[snap.subPhase] || ""];
+    if (snap.pending != null) {
+      parts.push(snap.pending === snap.mySeat ? "轮到你" : `轮到 ${snap.pending} 号`);
+    }
+    sub.append(el("span", null, parts.filter(Boolean).join(" · ")));
+    /* 行动倒计时（仅联机白天带 deadline，§5.11；单机恒无） */
+    if (snap.deadline && snap.deadline.at) {
+      sub.append(el("span", null, " · "));
+      const cd = el("span", "phase-countdown");
+      sub.append(cd);
+      armCountdown(cd, snap.deadline.at);
+    }
+    box.append(sub);
   } else {
     box.append(el("span", null, "对局"));
   }

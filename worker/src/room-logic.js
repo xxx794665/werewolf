@@ -177,6 +177,9 @@ export function snapshotFor(room, seat) {
   };
   if (!night) snap.subPhase = g.subPhase; // 夜里不露子阶段（§4.1.6）
   if (!night && pending != null) snap.pending = pending;
+  /* 白天透出行动倒计时（供 UI 吸顶状态条）；夜里不透——deadline.seat 即轮到谁，
+     会从快照泄漏夜里行动顺序（§4.1.6） */
+  if (!night && !revealed && room.deadline) snap.deadline = room.deadline;
   if (!night && g.pkCandidates) snap.pkCandidates = g.pkCandidates;
   if (revealed) {
     snap.winner = g.winner;

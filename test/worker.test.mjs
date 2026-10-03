@@ -295,6 +295,10 @@ test('天亮齐跳：夜结算公布死者后全员 rev+1，白天子阶段与 p
   assert.equal(s.subPhase, 'lastwords');
   assert.equal(typeof s.pending, 'number', '白天待行动座位公开');
   assert.ok(s.events.some((e) => e.t === 'deaths' && e.seats.includes(victim)), '公开事件含死讯公告');
+  /* 白天透出行动倒计时（吸顶状态条数据源，§5.11）；夜里不透——seat 即轮到谁（§4.1.6） */
+  assert.ok(s.deadline && s.deadline.at > T0 + 220 && s.deadline.seat === s.pending, '白天快照带 deadline {at, seat}');
+  const nightSnap = logic.snapshotFor(room, 1);
+  assert.equal(nightSnap.deadline, undefined, '夜里快照不透 deadline');
 });
 
 test('越权与非法动作被拒：非本人座位 / 非房主代打 / AI 座位不认 uid 直投', () => {
