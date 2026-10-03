@@ -823,3 +823,40 @@ test('纯度：advance / applyFallback 全程不改写入参状态', () => {
   game.applyFallback(s0, game.wolfCaptain(s0));
   assert.deepEqual(s0, frozen, '所有纯函数不得改写入参状态');
 });
+
+/* ---------------- 遗言回退按身份爆信息（2026-10-03 体验修复） ---------------- */
+
+test('遗言回退按身份交代基础信息：民报民+怀疑、女巫报药剂、预言家报验人记录', () => {
+  const { state: s0 } = newRoom(['张三', '李四', '王五'], 42);
+  // 平民首夜死 → 遗言回退必须报「我是平民」并给怀疑方向（不再说「我先过」）
+  const vDead = seatOf(s0, 'villager');
+  const nv = playNight(s0, { blade: vDead, witchMove: { move: 'skip' } });
+  assert.equal(nv.state.subPhase, 'lastwords');
+  const fv = game.applyFallback(nv.state, nv.state.queue[0]);
+  assert.equal(fv.error, null, fv.error);
+  assert.equal(fv.events[0].type, 'last_words');
+  assert.ok(fv.events[0].text.includes('我是平民'), `遗言应报身份：${fv.events[0].text}`);
+  assert.ok(fv.events[0].text.length <= 200, '遗言 ≤200 字');
+  // 女巫首夜死（放弃自救）→ 遗言报女巫 + 药剂状态
+  const w0 = wolfVoteAll(s0, seatOf(s0, 'witch'));
+  const w1 = adv(w0.state, { type: 'seer_check', seat: seatOf(s0, 'seer'), target: seatsOf(s0, 'villager')[1] });
+  const w2 = adv(w1.state, { type: 'witch_move', seat: seatOf(s0, 'witch'), move: 'skip' });
+  assert.equal(w2.state.subPhase, 'lastwords');
+  const fw = game.applyFallback(w2.state, w2.state.queue[0]);
+  assert.equal(fw.error, null, fw.error);
+  assert.ok(fw.events[0].text.includes('女巫'), `遗言应报女巫：${fw.events[0].text}`);
+  assert.ok(fw.events[0].text.includes('解药还在') && fw.events[0].text.includes('毒药还在'), '应交代两瓶药状态');
+  // 预言家首夜死（已验过 1 人）→ 遗言报预言家 + 验人记录
+  const s1 = wolfVoteAll(s0, seatOf(s0, 'seer'));
+  const s2 = adv(s1.state, { type: 'seer_check', seat: seatOf(s0, 'seer'), target: seatsOf(s0, 'villager')[1] });
+  const s3 = adv(s2.state, { type: 'witch_move', seat: seatOf(s0, 'witch'), move: 'skip' });
+  assert.equal(s3.state.subPhase, 'lastwords');
+  const fs = game.applyFallback(s3.state, s3.state.queue[0]);
+  assert.equal(fs.error, null, fs.error);
+  assert.ok(fs.events[0].text.includes('预言家'), `遗言应报预言家：${fs.events[0].text}`);
+  assert.ok(/验.*号/.test(fs.events[0].text), '应交代验人记录');
+  // 纯度：遗言回退不改写入参
+  const before = JSON.stringify(nv.state);
+  game.applyFallback(nv.state, nv.state.queue[0]);
+  assert.equal(JSON.stringify(nv.state), before, 'applyFallback 必须是纯函数');
+});

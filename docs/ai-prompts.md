@@ -212,18 +212,24 @@ save / 座位号 / skip 三选一并注明同晚一瓶、首夜可自救，解�
     { "role": "user",   "content": "……聊天记录 + 当前任务 + 输出格式……" }
   ],
   "temperature": 0.7,              // 冻结值（features.md §8.2）
-  "max_tokens": 800                // 冻结值：200 字中文 ≈ 600+ token，300 必截断，故 800
+  "max_tokens": 16384,             // 可配置（AI 设置「最大输出 tokens」），默认 16384、钳 64–32768：
+                                   // 思考型模型（体验通道 DS4.1）思考烧 2000+ token，800 必空正文
+  "stream": true                   // 思考型模型经体验通道网关只认流式（非流式恒 500 "empty response content"）
 }
 ```
 
 ### 5.1 响应解析（js/ai.js 与服务端路径同款规则）
 
-- 成功：取 `json.choices[0].message.content`（字符串）。上游非 200 / 无 choices = 失败。
+- 成功：`extractContent(raw)`（`shared/prompts.js` 单份共享）——SSE 流按 `data:` 帧聚合
+  `delta.content` 并记录 `finish_reason`；普通 JSON 支持 cline 的 `{ data: { choices } }`
+  信封包装（剥一层再读）。正文为空 = 失败。
 - 行动类解析（宽容序）：去首尾空白与标点 → 小写 → 命中 `save` / `skip` 即该值；
   否则取文中第一个 1–9 数字。仍无结果 = 解析失败，按「请求失败」处理。
 - 发言类：原文即正文；`> 200` 字截断到 200（DO 也会拒超长，`features.md` §5.8）。
-- 容错链（`features.md` §8.4）：单次超时 30s → 重试 1 次 → 仍失败走确定性回退
-  （发言兜底句 / 随机刀 / 随机验人 / 女巫跳过 / 猎人不开枪 / 随机投票，`shared/game.js`）。
+- 容错链（`features.md` §8.4）：单次超时 90s → 正文为空且 `finish=length` 或上游
+  500 "empty response content"（思考烧光预算的伪 500，实为截断）→ 放宽一倍 max_tokens
+  重试 1 次（上限 32768）→ 仍失败走确定性回退（遗言按身份交代基础信息 / 发言兜底句 /
+  随机刀 / 随机验人 / 女巫跳过 / 猎人不开枪 / 随机投票，`shared/game.js`）。
   回退在快照中不特殊标注。
 
 ### 5.2 单机：浏览器 → /api/ai-proxy → 上游
@@ -255,8 +261,9 @@ BYO Key / baseUrl / model 只存浏览器 localStorage，按请求透传，服�
 **Worker 侧行为**（`worker/src/index.js` 实装，`features.md` §8.2 / §10）：
 url-guard 校验 `url`（仅 http/https 公网，拒 localhost / 环回 / 私网 / 保留地址，
 永不简化）→ 重建出站请求（头白名单 content-type / authorization / x-api-key /
-anthropic-version / accept；body = `JSON.stringify(body)`）→ 30s 超时转发 →
-响应 ≤ 1MB → 原样回传上游 JSON（补 CORS 头）。限制：请求体 ≤ 64KB、同 IP 日 5000 次。
+anthropic-version / accept；body = `JSON.stringify(body)`）→ 90s 超时转发 →
+响应 ≤ 8MB → 原样回传上游响应（SSE 文本亦原样透传，补 CORS 头）。
+限制：请求体 ≤ 64KB、同 IP 日 5000 次。
 错误回 `{ "error": "URL_REJECTED" | "BODY_TOO_LARGE" | "RATE_LIMITED" | "UPSTREAM_ERROR" }`。
 
 **phase → 动作映射表**（联机经 `act(action, body)`，动作名照 `worker/src/index.js` 路由表；
@@ -299,7 +306,7 @@ DO 侧流程：
 2. 从自身状态构造该座位 `roleCard`（同一 §1.2 schema；服务端直接持有，不经 `ai_view`）；
 3. `buildMessages(history, roleCard, phase)`（import `shared/prompts.js`——这正是提示词
    放 `shared/` 而非 `js/` 的原因）→ §5.0 请求体；
-4. url-guard 校验上游 URL → 出站 fetch（30s 超时、失败重试 1 次）→ §5.1 解析 →
+4. url-guard 校验上游 URL → 出站 fetch（90s 超时、截断放宽重试 1 次）→ §5.1 解析 →
    结果直接写入状态机（语义等价于上表的 act() 动作，幂等规则相同）→ 失败走
    `shared/game.js` 确定性回退。**狼阶段例外（§4.1.1，ADR-0007）**：`parseWolfReply`
    解析出「密聊 + 投票」两段，一次 drive_ai 调用两段提交（先 `wolf-chat` 后

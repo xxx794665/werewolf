@@ -1,13 +1,14 @@
 /* test/prompts.test.mjs —— shared/prompts.js 最小可运行检查（node --test 自动发现）
  * 覆盖：消息形状、五角色提示词齐备、历史折叠与存活推导、私有字段白名单
  * （与角色不匹配的字段进不了提示词）、夜晚阶段角色强一致、女巫用药分支、
- * 每座位口吻、非法输入抛错。 */
+ * 每座位口吻、非法输入抛错、首日发言分支、输出预算钳制、响应提取。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
   buildMessages, PHASES, ROLE_PROMPTS, TASK_PROMPTS,
-  COMMON_CONSTRAINTS, BOARD_RULES, PERSONAS
+  COMMON_CONSTRAINTS, BOARD_RULES, PERSONAS,
+  clampMaxTokens, extractContent
 } from "../shared/prompts.js";
 
 /* 造一份小型公开历史：夜 1 死 4/7（首夜遗言）→ 白天发言 → 投票 → 放逐 5；
@@ -205,4 +206,49 @@ test("发言任务含长度约束；投票任务只允许座位号或 skip", () 
   assert.ok(sp.includes("100–200 字"));
   const vt = buildMessages(sampleHistory(), { seat: 3, role: "villager" }, "vote")[1].content;
   assert.ok(vt.includes("座位号数字，或 skip"));
+});
+
+/* ---------- 首日发言分支 + 输出预算钳制 + 响应提取（2026-10-03 体验修复） ---------- */
+
+test("speak 任务：无玩家发言时禁「观察流」，有发言后不加该分支", () => {
+  const first = buildMessages([{ t: "deaths", day: 1, seats: [5] }], { seat: 3, role: "villager" }, "speak")[1].content;
+  assert.ok(first.includes("信息不足、需要再观察一轮"), "首日发言必须禁观察流");
+  const later = buildMessages(sampleHistory(), { seat: 3, role: "villager" }, "speak")[1].content;
+  assert.ok(!later.includes("信息不足、需要再观察一轮"), "已有发言时不需要首日分支");
+});
+
+test("clampMaxTokens：空/非法回默认 16384，越界钳 64–32768", () => {
+  assert.equal(clampMaxTokens(""), 16384);
+  assert.equal(clampMaxTokens(null), 16384);
+  assert.equal(clampMaxTokens(undefined), 16384);
+  assert.equal(clampMaxTokens("abc"), 16384);
+  assert.equal(clampMaxTokens("16384"), 16384);
+  assert.equal(clampMaxTokens(1), 64);
+  assert.equal(clampMaxTokens(999999), 32768);
+});
+
+test("extractContent：SSE 聚合 delta.content 与 finish_reason", () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"role":"assistant"}}]}',
+    'data: {"choices":[{"delta":{"content":"我是3号"}}]}',
+    'data: {"choices":[{"delta":{"reasoning":"内苦深思"}}]}',
+    'data: {"choices":[{"delta":{"content":"平民。"},"finish_reason":null}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    "data: [DONE]",
+  ].join("\n");
+  const r = extractContent(sse);
+  assert.equal(r.content, "我是3号平民。");
+  assert.equal(r.finish, "stop");
+  assert.equal(extractContent("data: {broken").content, "");
+});
+
+test("extractContent：普通 JSON 与 cline { data: { choices } } 信封", () => {
+  const plain = JSON.stringify({ choices: [{ message: { content: "正文" }, finish_reason: "stop" }] });
+  assert.equal(extractContent(plain).content, "正文");
+  const wrapped = JSON.stringify({ data: { choices: [{ message: { content: "包一层" }, finish_reason: "length" }] } });
+  const w = extractContent(wrapped);
+  assert.equal(w.content, "包一层");
+  assert.equal(w.finish, "length");
+  assert.equal(extractContent('{"error":"empty response content"}').content, "");
+  assert.equal(extractContent("not json at all").content, "");
 });

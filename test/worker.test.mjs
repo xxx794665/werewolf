@@ -445,7 +445,8 @@ test('AI 契约：buildAIRequest 组装 §5.0 请求体，女巫 roleCard 含当
   assert.equal(req.url, 'https://api.openai.com/v1/chat/completions', 'baseUrl 去尾斜杠拼 /chat/completions');
   assert.equal(req.body.model, 'gpt-4o-mini');
   assert.equal(req.body.temperature, 0.7); // 冻结值
-  assert.equal(req.body.max_tokens, 800); // 冻结值
+  assert.equal(req.body.max_tokens, 16384); // 默认输出预算（思考型模型 800 必空正文）
+  assert.equal(req.body.stream, true); // 体验通道思考型模型只认流式
   assert.equal(req.body.messages.length, 2);
   assert.equal(req.body.messages[0].role, 'system');
   assert.ok(req.body.messages[1].content.includes('刀口'), '女巫 user 消息应含当夜刀口');
@@ -650,9 +651,9 @@ test('AI 代理：上游失败 / 超大响应截断 / 同 IP 日限 5000', async
   assert.equal(failed.error, 'UPSTREAM_ERROR');
 
   const huge = await proxyFetch('https://api.openai.com/v1', {}, '{}', 1000, async () => {
-    return new Response('y'.repeat(1024 * 1024 + 100));
+    return new Response('y'.repeat(8 * 1024 * 1024 + 100));
   });
-  assert.equal(huge.text.length, 1024 * 1024, '下行截断 ≤1MB');
+  assert.equal(huge.text.length, 8 * 1024 * 1024, '下行截断 ≤8MB');
 
   resetRateLimiterForTests();
   const ip = 'test-limited-ip';

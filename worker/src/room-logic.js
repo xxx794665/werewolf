@@ -20,7 +20,7 @@
  * ============================================================ */
 
 import * as game from '../../shared/game.js';
-import { buildMessages } from '../../shared/prompts.js';
+import { buildMessages, clampMaxTokens } from '../../shared/prompts.js';
 
 export const ACTION_TIMEOUT_MS = 150_000; // §5.11 行动超时（DO alarm）
 export const HOST_AFTER_MS = 60_000; // §7.7 无心跳转托管
@@ -501,7 +501,9 @@ export function buildAIRequest(room, seat, cfg) {
   try {
     const messages = buildMessages(windowHistory(room.log), card, phase);
     const url = String(cfg.baseUrl || '').replace(/\/+$/, '') + '/chat/completions';
-    return { url, body: { model: cfg.model, messages, temperature: 0.7, max_tokens: 800 } };
+    /* stream:true + 预算钳制：体验通道是思考型模型，只认流式且思考烧 2000+ token
+       （800 时代冻结值必空正文，见 shared/prompts.js AI_TOKEN_BUDGET 注释） */
+    return { url, body: { model: cfg.model, messages, temperature: 0.7, max_tokens: clampMaxTokens(cfg.maxTokens), stream: true } };
   } catch (e) {
     return { error: String((e && e.message) || e) }; // prompts 校验失败 → 调用方走确定性回退
   }

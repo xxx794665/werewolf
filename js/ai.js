@@ -18,10 +18,10 @@
  * ============================================================ */
 
 import * as game from "../shared/game.js";
-import { buildMessages } from "./prompts.js";
+import { buildMessages, extractContent, clampMaxTokens, AI_TOKEN_BUDGET } from "./prompts.js";
 import { apiBase } from "./net.js";
 
-const REQ_TIMEOUT_MS = 30_000; // §8.4 单次请求超时
+const REQ_TIMEOUT_MS = 90_000; // §8.4 单次请求超时（思考型模型流式出全文需 30–60s，30s 必超）
 const RETRY = 2; // 共尝试 2 次（失败重试 1 次）
 
 /* ---------- 内置体验通道（试用用户零配置可玩） ----------
@@ -37,9 +37,13 @@ export const DEFAULT_AI = {
 /**
  * 实际生效配置：用户自带配置优先，未配置（baseUrl / model 缺）时回退体验通道。
  * key 为空 → 请求不带 authorization 头 → Worker 注入体验通道 key。
+ * maxTokens 一律钳到合法区间（缺省 16384——思考型模型 800 必烧光见 AI_TOKEN_BUDGET）。
  */
 export function effectiveConfig(cfg = loadConfig()) {
-  return cfg.baseUrl && cfg.model ? cfg : { ...DEFAULT_AI, key: "" };
+  /* maxTokens 两个分支都钳：设置项对体验通道同样生效（BYO 未配时不算白填） */
+  const maxTokens = clampMaxTokens(cfg.maxTokens);
+  if (cfg.baseUrl && cfg.model) return { ...cfg, maxTokens };
+  return { ...DEFAULT_AI, key: "", maxTokens };
 }
 
 /* ---------- BYO 配置（localStorage，key 前缀 ww_ai_） ---------- */
@@ -50,14 +54,16 @@ export function loadConfig() {
     baseUrl: g("ww_ai_base").replace(/\/+$/, ""),
     key: g("ww_ai_key"),
     model: g("ww_ai_model"),
+    maxTokens: g("ww_ai_max_tokens"),
   };
 }
 
-export function saveConfig({ baseUrl, key, model }) {
+export function saveConfig({ baseUrl, key, model, maxTokens }) {
   if (typeof localStorage === "undefined") return;
   localStorage.setItem("ww_ai_base", String(baseUrl || "").trim().replace(/\/+$/, ""));
   localStorage.setItem("ww_ai_key", String(key || "").trim());
   localStorage.setItem("ww_ai_model", String(model || "").trim());
+  localStorage.setItem("ww_ai_max_tokens", String(maxTokens || "").trim());
 }
 
 export function hasConfig() {
@@ -69,37 +75,45 @@ export function hasConfig() {
 
 /**
  * messages = buildMessages(...) 的返回值，原样放入请求体。
- * 返回正文字符串；失败（超时 / 非 200 / 无 choices / 两次尝试皆败）返回 null，
+ * 返回正文字符串；失败（超时 / 非 200 / 无正文 / 两次尝试皆败）返回 null，
  * 调用方按 §8.4 走确定性回退（shared/game.js applyFallback）。
+ * 固定 stream:true：体验通道模型是思考型，网关只认流式（非流式恒 500
+ * "empty response content"）；正文为空且 finish=length 时按截断处理，
+ * 放宽一倍预算重试一次（参考母本 situation_puzzle 同款口径）。
  */
 export async function requestChat(messages) {
   const cfg = effectiveConfig(); // 自带配置优先，空配置回退体验通道（key 由 Worker 注入）
   if (!cfg.baseUrl || !cfg.model) return null;
-  const envelope = {
-    url: cfg.baseUrl + "/chat/completions", // §5.2：前端拼完整地址
-    body: { model: cfg.model, messages, temperature: 0.7, max_tokens: 800 }, // 冻结值（§5.0）
-  };
+  let budget = cfg.maxTokens;
   for (let attempt = 0; attempt < RETRY; attempt++) {
     try {
       const ctrl = new AbortController();
       const t = setTimeout(() => ctrl.abort(), REQ_TIMEOUT_MS);
       let res;
+      let raw;
       try {
         const headers = { "content-type": "application/json" };
         if (cfg.key) headers.authorization = `Bearer ${cfg.key}`; // 按请求透传（§8.2 头白名单）
         res = await fetch(apiBase() + "/api/ai-proxy", {
           method: "POST",
           headers,
-          body: JSON.stringify(envelope),
+          body: JSON.stringify({
+            url: cfg.baseUrl + "/chat/completions", // §5.2：前端拼完整地址
+            body: { model: cfg.model, messages, temperature: 0.7, max_tokens: budget, stream: true },
+          }),
           signal: ctrl.signal,
         });
+        raw = await res.text();
       } finally {
         clearTimeout(t);
       }
-      if (!res.ok) continue; // 限流 / URL_REJECTED / UPSTREAM_ERROR 一律按失败重试
-      const j = await res.json();
-      const content = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-      if (typeof content === "string" && content.trim()) return content;
+      const { content, finish } = extractContent(raw);
+      if (content.trim()) return content; // 截断但有正文也用（解析端按 200 字硬上限截断）
+      const starved = finish === "length" || (res.status >= 500 && /empty response content/i.test(raw));
+      if (starved) {
+        budget = Math.min(AI_TOKEN_BUDGET.max, budget * 2); // 思考烧光预算 → 放宽一倍
+        continue;
+      }
     } catch (e) {
       /* 超时 / 断网 → 下一次尝试 */
     }
@@ -346,15 +360,16 @@ export async function decideFor(g, log, seat) {
 
 /**
  * 用给定配置（缺省 = 输入框空值时走体验通道）发一条最小请求探活
- * （与游戏同走 /api/ai-proxy，测的是完整链路）。
+ * （与游戏同走 /api/ai-proxy、同为流式，测的是完整链路）。
  * 单次尝试不重试（快速反馈）。返回 { ok, ms?, reply?, error? }，error 为可读原因。
+ * 思考型模型思考烧光预算时正文为空：给出调大 maxTokens 的可操作提示。
  */
 export async function testConnection(cfg = loadConfig()) {
   cfg = effectiveConfig(cfg);
   if (!/^https?:\/\//i.test(cfg.baseUrl)) return { ok: false, error: "接口地址必须以 http:// 或 https:// 开头" };
   const started = Date.now();
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  const timer = setTimeout(() => ctrl.abort(), 60_000);
   try {
     const headers = { "content-type": "application/json" };
     if (cfg.key) headers.authorization = `Bearer ${cfg.key}`;
@@ -367,21 +382,37 @@ export async function testConnection(cfg = loadConfig()) {
           model: cfg.model,
           messages: [{ role: "user", content: "连接测试：请只回复两个字——正常" }],
           temperature: 0,
-          max_tokens: 16,
+          max_tokens: Math.min(cfg.maxTokens, 8192),
+          stream: true,
         },
       }),
       signal: ctrl.signal,
     });
-    const j = await res.json().catch(() => null);
+    const raw = await res.text();
+    const { content, finish } = extractContent(raw);
     if (!res.ok) {
-      const reason = j && (j.message || j.error);
-      return { ok: false, error: `HTTP ${res.status}${reason ? "：" + reason : ""}` };
+      let reason = "";
+      try { reason = JSON.parse(raw).error || ""; } catch (e2) { reason = ""; }
+      const starved = res.status >= 500 && raw.indexOf("empty response content") >= 0;
+      return {
+        ok: false,
+        error: starved
+          ? `HTTP ${res.status}：模型把输出预算烧在思考上没写出正文——把「最大输出 tokens」调大后重试`
+          : `HTTP ${res.status}${reason ? "：" + reason : ""}`,
+      };
     }
-    const content = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-    if (typeof content !== "string" || !content.trim()) return { ok: false, error: "上游返回了空回复" };
+    if (!content.trim()) {
+      return {
+        ok: false,
+        error:
+          finish === "length"
+            ? "模型思考烧光了输出预算（正文为空）——把「最大输出 tokens」调大后重试"
+            : "上游返回了空回复",
+      };
+    }
     return { ok: true, ms: Date.now() - started, reply: content.trim().slice(0, 40) };
   } catch (e) {
-    return { ok: false, error: e && e.name === "AbortError" ? "超时（15 秒无响应）" : "网络请求失败（检查地址与网络）" };
+    return { ok: false, error: e && e.name === "AbortError" ? "超时（60 秒无响应）" : "网络请求失败（检查地址与网络）" };
   } finally {
     clearTimeout(timer);
   }

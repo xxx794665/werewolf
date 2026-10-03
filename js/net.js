@@ -155,7 +155,7 @@ export function aiView(seat) {
 }
 
 export function driveAI(cfg) {
-  return act("drive_ai", { baseUrl: cfg.baseUrl, model: cfg.model, key: cfg.key || "" });
+  return act("drive_ai", { baseUrl: cfg.baseUrl, model: cfg.model, key: cfg.key || "", maxTokens: cfg.maxTokens });
 }
 
 /* ---------- 轮询（rev 游标 + 退避 + 回前台追赶） ---------- */

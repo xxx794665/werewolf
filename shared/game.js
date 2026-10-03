@@ -660,6 +660,42 @@ const FALLBACK_LINES = [
 ];
 
 /**
+ * 遗言回退：按身份交代基础信息（§5.4 提示词同口径——死了不能白死，
+ * 「先过/再观察」从死者嘴里说出来是穿帮）。只用本人私有信息（验人记录、
+ * 药剂状态）与公开的存活名单，绝不泄他人底牌；狼装好人给一个随机怀疑。
+ */
+function lastwordsLine(s, seat) {
+  const p = s.players[seat - 1];
+  const pool = aliveSeats(s).filter((x) => x !== seat);
+  let mark = '';
+  if (pool.length) {
+    const [t, rng] = pick(pool, s.rng); // 直觉怀疑方向：随机存活玩家（确定性走 state.rng）
+    s.rng = rng;
+    mark = `${t} 号有点不对劲，先盯一下`;
+  }
+  switch (p.role) {
+    case 'seer': {
+      const cs = (s.seerChecks || []).map((c) => `第${c.night}夜验${c.target}号是${c.isWolf ? '狼人' : '好人'}`);
+      return cs.length
+        ? `我是预言家，死前交底：${cs.join('，')}。这条信息别浪费，大家接着盘。`
+        : `我是预言家，还没来得及验人就被刀了。狼这么怕神职视角，说明刀口暴露了他们的心思。${mark}。`;
+    }
+    case 'witch': {
+      const w = s.witch || {};
+      const antidote = (w.antidote || 0) > 0 ? '解药还在' : '解药用掉了';
+      const poison = (w.poison || 0) > 0 ? '毒药还在' : '毒药用掉了';
+      return `我是女巫。${antidote}，${poison}，这条信息比我的命值钱。${mark}。`;
+    }
+    case 'hunter':
+      return `我是猎人，走得突然。${mark}，这是我最后的直觉，信不信由你们。`;
+    case 'werewolf':
+      return `我是平民，死得冤。${mark}，到死我都这么觉得，你们替我验一验。`;
+    default:
+      return `我是平民。${mark}，没有实锤，纯直觉，大家帮我接着往下盘。`;
+  }
+}
+
+/**
  * 对「当前待行动座位」执行确定性回退并推进游戏。
  * 纯函数：同 state 同结果（随机项走 state.rng）。
  * 调用方传 game.pendingSeat(state) 对应座位；座位不符时由 advance 校验拒绝。
@@ -675,6 +711,8 @@ export function applyFallback(state, seat) {
   switch (`${s.phase}:${s.subPhase}`) {
     case 'day:lastwords':
     case 'day:exile_lastwords':
+      action = { type: 'speak', seat, text: lastwordsLine(s, seat) }; // 遗言按身份爆信息，死者不能白死
+      break;
     case 'day:speak':
     case 'day:pk_speak':
       action = { type: 'speak', seat, text: FALLBACK_LINES[seat % FALLBACK_LINES.length] }; // 固定兜底句，按座位轮换

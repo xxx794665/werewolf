@@ -119,6 +119,62 @@ const SPEECH_PHASES = ["speak", "lastwords", "pk_speak"];
 const ROLES = ["wolf", "villager", "seer", "witch", "hunter"];
 const SEATS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
+/* ---------- 输出预算（max_tokens）：思考型模型的硬前提 ----------
+ * 体验通道模型（cline-pass/deepseek-v4.1-flash）默认开启思考，思考轻松烧掉
+ * 2000+ token；800 时代的冻结值必然「思考烧光、正文为空」（上游 500
+ * "empty response content"，实为截断）。默认 16384、钳 64–32768，
+ * 与参考母本 situation_puzzle 同口径。 */
+export const AI_TOKEN_BUDGET = { min: 64, max: 32768, default: 16384 };
+
+/** 把任意输入钳成合法的 max_tokens（配置项容错；空值 / 非法值回默认）。 */
+export function clampMaxTokens(v) {
+  if (v === "" || v === null || v === undefined) return AI_TOKEN_BUDGET.default;
+  const n = Math.floor(Number(v));
+  if (!Number.isFinite(n)) return AI_TOKEN_BUDGET.default;
+  return Math.max(AI_TOKEN_BUDGET.min, Math.min(AI_TOKEN_BUDGET.max, n));
+}
+
+/* ---------- 响应侧纯函数：从 OpenAI 兼容响应提取正文 ----------
+ * js/ai.js（单机）与 Worker fetchAI（联机）共用，ADR-0001 单份原则。覆盖：
+ *   1. stream:true 的 SSE 文本（data: 帧聚合 delta.content，记录 finish_reason）；
+ *   2. 普通 JSON；cline 体验通道把信封包一层 { data: { choices } }，剥一层再读；
+ *   3. 正文为空（思考烧光预算 / 网关错误）时返回 content:""，由调用方按截断
+ *      放宽预算重试或走确定性回退。
+ * 返回 { content: string, finish: string|null }。 */
+export function extractContent(raw) {
+  const text = typeof raw === "string" ? raw : "";
+  if (/^\s*data:/.test(text)) {
+    let content = "";
+    let finish = null;
+    for (const line of text.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const p = line.slice(5).trim();
+      if (!p || p === "[DONE]") continue;
+      let j;
+      try { j = JSON.parse(p); } catch (e) { continue; } // 半截帧丢弃
+      const ch = j && j.choices && j.choices[0];
+      if (ch) {
+        const d = ch.delta || ch.message || {};
+        if (typeof d.content === "string") content += d.content;
+        if (ch.finish_reason) finish = ch.finish_reason;
+      }
+    }
+    return { content, finish };
+  }
+  let j = null;
+  try { j = JSON.parse(text); } catch (e) { j = null; }
+  if (!j || typeof j !== "object") return { content: "", finish: null };
+  const choices = j.data && typeof j.data === "object" && j.data.choices ? j.data.choices : j.choices;
+  const ch = (choices && choices[0]) || {};
+  const msg = ch.message || {};
+  let content = "";
+  if (typeof msg.content === "string") content = msg.content;
+  else if (Array.isArray(msg.content)) {
+    content = msg.content.map(function (s) { return typeof s === "string" ? s : (s && s.text) || ""; }).join("");
+  } else if (typeof ch.text === "string") content = ch.text;
+  return { content, finish: ch.finish_reason || null };
+}
+
 /* ---------- 输出格式约定（追加在 user 消息末尾，按任务类型二选一 / 三选一） ---------- */
 const SPEECH_FORMAT =
   "【输出格式】只输出发言正文本身，长度 100–200 字（游戏硬上限 200 字）。不要任何称呼、前缀、引号、括号注释或多余说明。";
@@ -132,9 +188,16 @@ const WITCH_FORMAT =
 /* ---------- 任务提示词：每阶段一个渲染函数（ctx 由 buildMessages 组装） ---------- */
 export const TASK_PROMPTS = {
   speak(ctx) {
-    return (
+    const base =
       "【当前任务】现在轮到你发言。结合聊天记录给出你的推理与立场：你认为谁可疑、为什么、这一轮票该往哪走；" +
-      "需要亮身份或报信息时按你的战术判断（好人报实情、狼可以说谎）。"
+      "需要亮身份或报信息时按你的战术判断（好人报实情、狼可以说谎）。";
+    if (ctx.speechSeen) return base;
+    return (
+      base +
+      "注意：聊天记录里还没有任何玩家发言，你是本轮最早的发言者——死亡名单本身就是信息" +
+      "（首夜刀口位置、平安夜=女巫救了刀），结合它给出具体的第一直觉：怀疑哪个座位、为什么，" +
+      "或明确交代你的立场。禁止把「信息不足、需要再观察一轮」当成本次发言的内容或结论；" +
+      "观察是听完别人发言之后的事，现在必须留下一个可被反驳的观点。"
     );
   },
   lastwords(ctx) {
@@ -281,6 +344,7 @@ function foldHistory(history) {
   let day = 0;
   let lastTie = null;
   let curDay = 0;
+  let speechSeen = 0; // 已有玩家发言数（speak 任务首日分支依据，纯 history 推导）
   history.forEach(function (ev, i) {
     const where = "history[" + i + "]";
     if (!ev || typeof ev !== "object") fail(where + " 必须是对象");
@@ -311,14 +375,17 @@ function foldHistory(history) {
       case "speech":
         if (!isSeat(ev.seat)) fail(where + ".seat 必须是座位号");
         lines.push(ev.seat + "号：" + str(ev.text, where + ".text"));
+        speechSeen += 1;
         break;
       case "lastwords":
         if (!isSeat(ev.seat)) fail(where + ".seat 必须是座位号");
         lines.push(ev.seat + "号（遗言）：" + str(ev.text, where + ".text"));
+        speechSeen += 1;
         break;
       case "pk_speak":
         if (!isSeat(ev.seat)) fail(where + ".seat 必须是座位号");
         lines.push(ev.seat + "号（PK 发言）：" + str(ev.text, where + ".text"));
+        speechSeen += 1;
         break;
       case "tie": {
         const seats = seatList(ev.seats, where + ".seats");
@@ -359,7 +426,7 @@ function foldHistory(history) {
     }
   });
   const alive = SEATS.filter(function (s) { return !dead.has(s); });
-  return { lines, day, alive, pkSeats: lastTie };
+  return { lines, day, alive, pkSeats: lastTie, speechSeen };
 }
 
 /* 校验 roleCard 并渲染该座位自己的私有信息（其余字段一律忽略——白名单） */
@@ -471,6 +538,7 @@ export function buildMessages(history, roleCard, phase) {
     role,
     alive: fold.alive,
     pkSeats: fold.pkSeats,
+    speechSeen: fold.speechSeen,
     antidote: roleCard.antidote,
     poison: roleCard.poison,
     knifeTarget: roleCard.knifeTarget,

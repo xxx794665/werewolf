@@ -11,7 +11,7 @@
  * alarm：行动超时 150s / 托管 / 房主作废（room-logic.nextAlarmAt 排程）。
  * drive_ai（服务端发起 AI 行动，docs/ai-prompts.md §5.3.2 变体）：
  *   房主带 BYO 配置调用 → DO 组装提示词（shared/prompts.js）→ proxyFetch
- *   （30s 超时、重试 1 次）→ 解析 → 提交内核；失败走确定性回退。
+ *   （90s 超时、截断放宽重试 1 次）→ 解析 → 提交内核；失败走确定性回退。
  *   Key 只在请求内瞬态使用，不落盘不打日志。
  * ============================================================ */
 
@@ -19,6 +19,7 @@ import * as logic from './room-logic.js';
 import * as game from '../../shared/game.js';
 import { checkUrl } from './url-guard.js';
 import { proxyFetch, UPSTREAM_TIMEOUT_MS, isDefaultAiUrl } from './ai-proxy.js';
+import { extractContent, AI_TOKEN_BUDGET } from '../../shared/prompts.js';
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -164,7 +165,7 @@ export class Room {
     try {
       const fresh = await this.load(); // 出站前重读最新状态（alarm 可能已推进）
       if (game.pendingSeat(fresh.game) !== seat) return json({ error: 'STALE', message: '座位已行动' }, 409);
-      const req = logic.buildAIRequest(fresh, seat, { baseUrl: body.baseUrl, model: body.model });
+      const req = logic.buildAIRequest(fresh, seat, { baseUrl: body.baseUrl, model: body.model, maxTokens: body.maxTokens });
       if (req.error) return json({ error: 'BAD_REQUEST', message: req.error }, 400);
 
       let text = null;
@@ -231,22 +232,21 @@ export class Room {
     }
   }
 
-  /** 出站执行：仅调用已过 url-guard 的 url；30s 超时，失败重试 1 次（§8.4）。 */
+  /** 出站执行：仅调用已过 url-guard 的 url；90s 超时（思考型模型流式出全文需
+   *  30–60s），正文为空且疑似截断时放宽一倍预算重试 1 次（§8.4，与客户端同口径）。 */
   async fetchAI(url, reqBody, key) {
     const headers = { 'content-type': 'application/json' };
     if (key) headers.authorization = `Bearer ${key}`; // 瞬态透传，不落盘不打日志
-    const payload = JSON.stringify(reqBody);
+    let budget = reqBody.max_tokens || AI_TOKEN_BUDGET.default;
     for (let i = 0; i < 2; i++) {
-      const out = await proxyFetch(url, headers, payload, UPSTREAM_TIMEOUT_MS);
+      const out = await proxyFetch(url, headers, JSON.stringify({ ...reqBody, max_tokens: budget }), UPSTREAM_TIMEOUT_MS);
       if (out.error) continue;
-      if (out.status >= 200 && out.status < 300) {
-        try {
-          const j = JSON.parse(out.text);
-          const content = j && j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-          if (typeof content === 'string') return content;
-        } catch (e) {
-          /* 非法 JSON → 按失败处理 */
-        }
+      const { content, finish } = extractContent(out.text);
+      if (content.trim()) return content; // 截断但有正文也用（解析端按 200 字硬上限截断）
+      const starved = finish === 'length' || (out.status >= 500 && out.text.indexOf('empty response content') >= 0);
+      if (starved) {
+        budget = Math.min(AI_TOKEN_BUDGET.max, budget * 2); // 思考烧光预算 → 放宽一倍
+        continue;
       }
     }
     return null;

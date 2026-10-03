@@ -139,6 +139,9 @@
       <label class="field"><span class="field-label">模型名</span>
         <input id="cfg-model" autocomplete="off" placeholder="gpt-4o-mini">
       </label>
+      <label class="field"><span class="field-label">最大输出 tokens（思考型模型建议 ≥8192）</span>
+        <input id="cfg-maxtokens" type="number" inputmode="numeric" min="64" max="32768" step="64" autocomplete="off" placeholder="16384（默认）">
+      </label>
       <!-- js/ai.js：存 localStorage（uid / 昵称同处）；请求一律经 Worker /api/ai-proxy 转发 -->
       <button class="btn btn-primary" id="cfg-save" type="button">保存</button>
       <!-- js/app.js：用输入框当前值发一条最小请求探活（不保存也能测），走与游戏相同的代理链路 -->

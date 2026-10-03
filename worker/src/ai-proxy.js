@@ -11,7 +11,7 @@
  *     incomingHeaders)             转发头白名单 / body ≤64KB / url-guard
  *   proxyFetch(upstream, ...)    出站执行器：只接收**已过 url-guard 校验**
  *                                的公网 URL（features.md §10 硬性验收，
- *                                30s 超时、响应 ≤1MB）
+ *                                90s 超时、响应 ≤8MB）
  * Key 只按请求透传（白名单头之一），不落盘、不打日志。
  * 错误码：URL_REJECTED / BODY_TOO_LARGE / RATE_LIMITED / UPSTREAM_ERROR。
  * ============================================================ */
@@ -30,8 +30,10 @@ export function isDefaultAiUrl(url) {
 
 const HEADER_WHITELIST = ['content-type', 'authorization', 'x-api-key', 'anthropic-version', 'accept'];
 const BODY_MAX_BYTES = 64 * 1024; // 请求体上限（features.md §8.2）
-const RESP_MAX_CHARS = 1024 * 1024; // 响应上限 1MB（ponytail: 按 text.length 近似）
-export const UPSTREAM_TIMEOUT_MS = 30_000; // 单次转发超时（features.md §8.4）
+/* 响应上限 8MB（ponytail: 按 text.length 近似）：体验通道走 SSE 后逐 token 帧
+   体积肥（≈350B/token），16k 预算的思考型响应可超 1MB 旧上限 */
+const RESP_MAX_CHARS = 8 * 1024 * 1024;
+export const UPSTREAM_TIMEOUT_MS = 90_000; // 单次转发超时：思考型模型流式出全文需 30–60s（DO 150s 行动超时内完成一轮）
 
 /* 同 IP 日计数（isolate 内存；重启清零 = 已知限制） */
 const ipDayCounts = new Map();
@@ -114,7 +116,8 @@ export async function proxyFetch(upstream, headers, payload, timeoutMs, fetchImp
     const text = (await res.text()).slice(0, RESP_MAX_CHARS);
     return { status: res.status, text, contentType: res.headers.get('content-type') };
   } catch (e) {
-    return { error: 'UPSTREAM_ERROR', message: '转发失败或超时（30s）' };
+    const sec = Math.round((timeoutMs || UPSTREAM_TIMEOUT_MS) / 1000);
+    return { error: 'UPSTREAM_ERROR', message: `转发失败或超时（${sec}s）` };
   } finally {
     clearTimeout(timer);
   }

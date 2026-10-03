@@ -432,7 +432,7 @@ function bind() {
       ui.toast("接口地址必须以 http:// 或 https:// 开头");
       return;
     }
-    ai.saveConfig({ baseUrl, key: $("cfg-key").value, model: $("cfg-model").value });
+    ai.saveConfig({ baseUrl, key: $("cfg-key").value, model: $("cfg-model").value, maxTokens: $("cfg-maxtokens").value });
     ui.toast("已保存（只存本机浏览器）");
   });
 
@@ -442,11 +442,12 @@ function bind() {
     const out = $("cfg-test-result");
     btn.disabled = true;
     out.hidden = false;
-    out.textContent = "测试中…（最长 15 秒）";
+    out.textContent = "测试中…（思考型模型最长 60 秒）";
     const r = await ai.testConnection({
       baseUrl: $("cfg-baseurl").value.trim(),
       key: $("cfg-key").value,
       model: $("cfg-model").value,
+      maxTokens: $("cfg-maxtokens").value,
     });
     btn.disabled = false;
     out.textContent = r.ok
@@ -471,6 +472,7 @@ function fillSettings() {
   $("cfg-baseurl").value = c.baseUrl;
   $("cfg-key").value = c.key;
   $("cfg-model").value = c.model;
+  $("cfg-maxtokens").value = c.maxTokens;
 }
 
 /* ---------- 启动 ---------- */

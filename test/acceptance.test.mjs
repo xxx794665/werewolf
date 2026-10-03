@@ -264,7 +264,8 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
         assert.equal(call.envelope.url, 'https://stub.example.com/v1/chat/completions', '信封 url = baseUrl + /chat/completions');
         assert.equal(call.envelope.body.model, 'stub-model');
         assert.equal(call.envelope.body.temperature, 0.7, '冻结值 temperature=0.7');
-        assert.equal(call.envelope.body.max_tokens, 800, '冻结值 max_tokens=800');
+        assert.equal(call.envelope.body.max_tokens, 16384, '默认输出预算 16384（思考型模型 800 必空正文）');
+        assert.equal(call.envelope.body.stream, true, '体验通道思考型模型只认流式');
         requests.push({
           seat,
           phase,
