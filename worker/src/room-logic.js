@@ -131,10 +131,10 @@ function privateOf(g, me) {
   const you = { seat: me.seat, alive: !!me.alive, role: me.role };
   if (me.role === 'werewolf') {
     you.wolves = g.players.filter((p) => p && p.role === 'werewolf').map((p) => p.seat);
+    // §4.1.1 狼队密聊全程日志：跨夜保留，存活狼座白天也能回看（死者走观战视角，另无此字段）
+    if (me.alive) you.wolfChatLog = g.wolfChatLog || [];
     if (g.phase === 'night' && me.alive && g.night) {
       if (g.night.blade != null) you.blade = g.night.blade;
-      // §4.1.1 狼队密聊与定刀投票：仅存活狼座可见（死者走观战视角，另无此字段）
-      you.wolfChat = g.night.wolfChat || [];
       you.wolfVotes = g.night.wolfVotes || {};
       you.captain = game.wolfCaptain(g); // 平票裁定者（由存活狼推得，狼座本可知）
     }
@@ -417,8 +417,8 @@ export function roleCardOf(g, seat) {
   if (p.persona) card.persona = p.persona;
   if (p.role === 'werewolf') {
     card.wolves = g.players.filter((x) => x && x.role === 'werewolf').map((x) => x.seat);
+    card.wolfChatLog = g.wolfChatLog || []; // §4.1.1 狼队私有频道全程日志（跨夜保留；白天任务也带）
     if (g.phase === 'night' && g.subPhase === 'wolf' && g.night) {
-      card.wolfChat = g.night.wolfChat || []; // §4.1.1 狼自己的私有频道进 roleCard（上下文铁律不破）
       card.wolfVotes = g.night.wolfVotes || {};
       card.captain = game.wolfCaptain(g);
     }

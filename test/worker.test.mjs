@@ -249,10 +249,10 @@ test('夜视角冻结（§4.1.6 / §4.1.1 / ADR-0002）：密聊只有狼座可�
   assert.equal(after.revs[seer], room.revs[seer], '狼阶段未结束，预言家仍冻结');
   const wSnap = logic.snapshotFor(after, cap);
   assert.equal(wSnap.action.kind, 'wolf', '狼阶段行动面板对全员狼开放');
-  assert.deepEqual(wSnap.you.wolfChat, [{ seat: cap, text: '白天我带节奏，你们补刀口' }], '密聊进狼座私有视角');
+  assert.deepEqual(wSnap.you.wolfChatLog, [{ n: 1, seat: cap, text: '白天我带节奏，你们补刀口' }], '密聊日志进狼座私有视角');
   assert.deepEqual(wSnap.you.wolfVotes, {}, '投票暂空');
   const vSnap = logic.snapshotFor(after, villager);
-  assert.equal(vSnap.you.wolfChat, undefined, '非狼座位绝不带密聊字段');
+  assert.equal(vSnap.you.wolfChatLog, undefined, '非狼座位绝不带密聊字段');
   assert.equal(vSnap.you.wolfVotes, undefined);
   assert.equal(vSnap.action, undefined);
   // 夜里快照不露子阶段（非行动非知情座位只看到 night）
@@ -602,8 +602,8 @@ test('drive_ai 狼阶段（§4.1.1）：一次调用提交密聊 + 投票两段�
     assert.equal(r1.ok, true, JSON.stringify(r1));
     assert.equal(r1.via, 'ai');
     const g1 = room.room.game;
-    assert.equal(g1.night.wolfChat.length, 1, '密聊入账');
-    assert.equal(g1.night.wolfVotes[g1.night.wolfChat[0].seat], 4, '同一次调用完成投票');
+    assert.equal(g1.wolfChatLog.length, 1, '密聊入账');
+    assert.equal(g1.night.wolfVotes[g1.wolfChatLog[0].seat], 4, '同一次调用完成投票');
 
     // 桩上游不可达 → 回退：只随机投票，不产生密聊
     globalThis.fetch = async () => {
@@ -612,7 +612,7 @@ test('drive_ai 狼阶段（§4.1.1）：一次调用提交密聊 + 投票两段�
     const r2 = await rpc('drive_ai', CFG);
     assert.equal(r2.ok, true, JSON.stringify(r2));
     assert.equal(r2.via, 'fallback');
-    assert.equal(room.room.game.night.wolfChat.length, 1, '回退不产生密聊');
+    assert.equal(room.room.game.wolfChatLog.length, 1, '回退不产生密聊');
     assert.equal(Object.keys(room.room.game.night.wolfVotes).length, 2, '回退投出一票');
 
     // 重试（§8.4）：第一次请求抛错 → 第二次合法 → via='ai'，恰好 2 次尝试
@@ -629,7 +629,7 @@ test('drive_ai 狼阶段（§4.1.1）：一次调用提交密聊 + 投票两段�
     assert.equal(r3.ok, true, JSON.stringify(r3));
     assert.equal(r3.via, 'ai', '重试成功不走回退');
     assert.equal(calls, 2, '失败后恰好重试 1 次');
-    assert.equal(room.room.game.night.wolfChat.length, 2, '重试成功密聊入账');
+    assert.equal(room.room.game.wolfChatLog.length, 2, '重试成功密聊入账');
 
     // 格式不合格（无数字无 skip）→ 重试后合法（此时狼已投完，轮到预言家 AI）
     let step = 0;

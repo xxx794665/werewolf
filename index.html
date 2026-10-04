@@ -104,8 +104,21 @@
       <!-- 身份卡：我的角色 + 合法私有信息（狼队友 / 验史 / 药态 / 刀口），js/ui.js renderIdCard -->
       <div class="idcard" id="idcard"></div>
 
+      <!-- 投票记录卡（§5.14）：按天 / 轮次（主投票 / PK 投票）分组的逐人票型 + 得票 + 结果速查；
+           纯前端从公开事件流重组（js/ui.js renderVoteHistory），默认收起，open 状态由浏览器保持 -->
+      <details class="card hidden" id="vote-history">
+        <summary>投票记录（按轮次）</summary>
+        <div id="vote-history-list"></div>
+      </details>
+
       <!-- 公开事件流：发言 / 遗言 / PK / 投票去向 / 死讯 / 翻牌与枪杀公告（渲染归 js/ui.js） -->
       <ul class="log" id="log" aria-live="polite"></ul>
+
+      <!-- 狼队密聊历史（§4.1.1 修订：仅存活狼座可见，跨夜保留、白天可回看；狼夜行动面板实时展示时本卡不重复） -->
+      <details class="card hidden" id="wolf-history" open>
+        <summary>狼队密聊记录（仅狼队可见）</summary>
+        <ul class="wolf-chat" id="wolf-history-list"></ul>
+      </details>
 
       <!-- 座位网格（存活 / 死亡 / 托管 / 我）：渲染归 js/ui.js；「＋」= 私人标签编辑（只存本机） -->
       <p class="hint">快速记人：点座位行的「＋」加私人标签（好人 / 狼 / 查杀等，仅存本机浏览器）。</p>

@@ -104,20 +104,16 @@ function assertNoLeak(req) {
   // roster（全员昵称对照）与 persona（AI 言行风格）是公开层字段（ADR-0009），与身份无关
   const keys = Object.keys(card).sort();
   if (card.role === 'wolf') {
-    // §4.1.1：狼阶段额外带密聊 / 投票 / 队长（均属狼座合法私有视角）
+    // §4.1.1：狼身份卡全阶段携带密聊全程日志（跨夜保留）；狼阶段另带狼票 / 队长
     assert.ok(
-      keys.every((k) => ['role', 'seat', 'wolves', 'wolfChat', 'wolfVotes', 'captain', 'roster', 'persona'].includes(k)),
+      keys.every((k) => ['role', 'seat', 'wolves', 'wolfChatLog', 'wolfVotes', 'captain', 'roster', 'persona'].includes(k)),
       `${label}: 狼身份卡字段越界：${keys.join(',')}`
     );
     const actual = state.players.filter((p) => p && p.role === 'werewolf').map((p) => p.seat);
     assert.deepEqual(card.wolves, actual, `${label}: 狼队友名单必须等于真实狼座位`);
-    if ('wolfChat' in card) {
-      assert.equal(phase, 'wolf', `${label}: 密聊只允许出现在狼阶段身份卡`);
-      assert.deepEqual(
-        card.wolfChat,
-        (state.night && state.night.wolfChat) || [],
-        `${label}: 密聊记录必须等于真实频道内容`
-      );
+    assert.deepEqual(card.wolfChatLog, state.wolfChatLog || [], `${label}: 密聊日志必须等于真实频道内容（全阶段携带）`);
+    if ('wolfVotes' in card) {
+      assert.equal(phase, 'wolf', `${label}: 狼票 / 队长只允许出现在狼阶段身份卡`);
       assert.deepEqual(
         card.wolfVotes,
         (state.night && state.night.wolfVotes) || {},
@@ -125,7 +121,7 @@ function assertNoLeak(req) {
       );
       assert.equal(card.captain, game.wolfCaptain(state), `${label}: 队长必须是内核推导值`);
     } else {
-      assert.notEqual(phase, 'wolf', `${label}: 狼阶段身份卡必须携带密聊频道`);
+      assert.notEqual(phase, 'wolf', `${label}: 狼阶段身份卡必须携带狼票`);
     }
   } else if (card.role === 'seer') {
     assert.deepEqual(keys, ['checks', 'persona', 'role', 'roster', 'seat'], `${label}: 预言家身份卡字段越界`);

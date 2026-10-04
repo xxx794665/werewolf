@@ -720,18 +720,20 @@ test('狼队密聊：仅存活狼、限长限次、不产生公开事件（§4.1
   let r = adv(s0, { type: 'wolf_chat', seat: wolves[0], text: '刀 4 号，白天我跳预言家' });
   assert.equal(r.error, null);
   assert.deepEqual(r.events, [], '密聊不产生公开事件（§4.1.5）');
-  assert.deepEqual(r.state.night.wolfChat, [{ seat: wolves[0], text: '刀 4 号，白天我跳预言家' }]);
+  assert.deepEqual(r.state.wolfChatLog, [{ n: 1, seat: wolves[0], text: '刀 4 号，白天我跳预言家' }]);
   let s = r.state;
   for (let i = 0; i < game.WOLF_CHAT_TURNS - 1; i++) {
     s = adv(s, { type: 'wolf_chat', seat: wolves[0], text: `补 ${i}` }).state;
   }
   assert.ok(adv(s, { type: 'wolf_chat', seat: wolves[0], text: '第六条' }).error.includes('5 条'), '每晚每狼限 5 条');
-  // 死狼被拒（白盒标记死亡）；天亮结算后 night 清空、密聊随夜蒸发
+  // 死狼被拒（白盒标记死亡）；天亮结算后 night 瞬时清空、密聊日志跨夜保留（§4.1.1 修订）
   const sDead = structuredClone(s);
   sDead.players[wolves[1] - 1].alive = false;
   assert.equal(adv(sDead, { type: 'wolf_chat', seat: wolves[1], text: '我还想聊' }).error, '只有存活狼人可以参与密聊');
-  const dawn = playNight(s0, { blade: villager, witchMove: { move: 'skip' } });
-  assert.equal(dawn.state.night, null, '天亮密聊即清');
+  const dawn = playNight(s, { blade: villager, witchMove: { move: 'skip' } });
+  assert.equal(dawn.state.night, null, '天亮当夜瞬时信息清空');
+  assert.equal(dawn.state.wolfChatLog.length, game.WOLF_CHAT_TURNS, '密聊日志跨夜保留不清空');
+  assert.ok(dawn.state.wolfChatLog.every((m) => m.n === 1), '日志条目带夜号');
 });
 
 test('待行动座位：狼阶段 = 第一个未投票的存活狼（AI 驱动与 150s 超时按此逐狼推进）', () => {

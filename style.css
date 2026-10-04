@@ -74,6 +74,7 @@ main {
 h2 { margin: 10px 0 12px; font-size: 20px; }
 h3 { margin: 0 0 8px; font-size: 16px; }
 .hint { color: var(--muted); font-size: 13px; } /* ≥12px 下限 */
+.hidden { display: none; } /* 通用显隐开关（狼队密聊卡 / 投票记录卡由 JS classList.toggle 驱动） */
 
 /* ---------- 卡片与表单（flex 防压瘪：子项 min-width: 0） ---------- */
 .card {
@@ -409,6 +410,17 @@ input {
 }
 .wolf-chat-line.me { border-left-color: var(--accent); }
 .wolf-chat-empty { color: var(--muted); border-left-color: var(--line); }
+.wolf-chat-night { color: var(--muted); font-size: 12px; padding: 2px 4px 0; }
+/* 白天历史卡（§4.1.1 修订：跨夜保留可回看）：summary 可折叠，open 状态由浏览器保持 */
+#wolf-history summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+#wolf-history .wolf-chat { margin: 10px 0 0; max-height: none; }
+/* 投票记录卡（§5.14）：同上的折叠卡口粮 */
+#vote-history summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.vote-round { border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 8px; padding: 8px 10px; margin-top: 8px; font-size: 14px; }
+.vote-round-head { font-weight: 600; }
+.vote-ongoing { color: var(--accent); font-weight: 400; }
+.vote-votes { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.vote-round-meta { color: var(--muted); font-size: 13px; }
 .chat-input-row { display: flex; gap: 8px; margin-bottom: 12px; }
 .chat-input {
   font: inherit; /* ≥16px：iOS 聚焦不放大（同 .speech-input 口径） */

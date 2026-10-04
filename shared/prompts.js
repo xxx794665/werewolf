@@ -48,7 +48,7 @@ export const ROLE_PROMPTS = {
     name: "狼人",
     faction: "狼人阵营",
     rules:
-      "你与队友在夜里共同行动：先在只有狼队可见的密聊频道里商量（对好人完全不可见，天亮即清空），然后全员投票定刀——每人一票不可更改，得票最高的目标成为今晚刀口，平票时由狼队长一锤定音（存活狼真人优先、多人取座位号最小，否则座位号最小的 AI 狼）。刀口不可为空；投队友或投自己在规则上允许。你知道全部狼队友是谁及他们的存活状态。",
+      "你与队友在夜里共同行动：先在只有狼队可见的密聊频道里商量（对好人完全不可见；记录跨夜保留，白天你可以回看历史密聊，但白天不能发言），然后全员投票定刀——每人一票不可更改，得票最高的目标成为今晚刀口，平票时由狼队长一锤定音（存活狼真人优先、多人取座位号最小，否则座位号最小的 AI 狼）。刀口不可为空；投队友或投自己在规则上允许。你知道全部狼队友是谁及他们的存活状态。",
     strategy:
       "白天你的核心是伪装：像普通好人一样盘逻辑、适度怀疑、认真投票。可以说谎——悍跳预言家或女巫、报假查验都是狼的合法战术，但谎要圆，经不起细节盘问就别编太满。高阶玩法看局势选用：投队友出局换信任（狼咬狼）、当众假跳狼玩心态、故意说错信息钓好人的反应、深水到底不出头——一切以骗过好人为唯一目标，别为了骚操作把局势玩崩。队友被推上风口浪尖时权衡保与不保，别明显护短；投票要么跟着好人主流走，要么悄悄把票导向好人出局。夜里密聊跟队友对好口型、统一白天的话术，别各说各话。"
   },
@@ -257,12 +257,18 @@ export const TASK_PROMPTS = {
   },
   wolf(ctx) {
     const lines = [];
-    const chat = Array.isArray(ctx.wolfChat) ? ctx.wolfChat : [];
-    if (chat.length) {
-      lines.push("【狼队密聊记录（只有狼队可见，天亮即清）】");
-      for (const m of chat) lines.push(m.seat + " 号：" + m.text);
+    const log = Array.isArray(ctx.wolfChatLog) ? ctx.wolfChatLog : [];
+    const history = log.filter(function (m) { return m.n !== ctx.night; });
+    const tonight = log.filter(function (m) { return m.n === ctx.night; });
+    if (history.length) {
+      lines.push("【狼队密聊历史（只有狼队可见，跨夜保留）】");
+      for (const m of history) lines.push("第" + m.n + "夜 " + m.seat + " 号：" + m.text);
+    }
+    if (tonight.length) {
+      lines.push("【今晚密聊】");
+      for (const m of tonight) lines.push(m.seat + " 号：" + m.text);
     } else {
-      lines.push("【狼队密聊记录】今晚队友还没说话。");
+      lines.push("【今晚密聊】今晚队友还没说话。");
     }
     const votes = ctx.wolfVotes && typeof ctx.wolfVotes === "object" ? ctx.wolfVotes : {};
     const cast = Object.keys(votes)
@@ -293,6 +299,18 @@ export const TASK_PROMPTS = {
     );
   }
 };
+
+/* 狼座白天任务注入密聊历史（§4.1.1 修订：记录跨夜保留、白天可回看；
+ * 夜里 wolf 任务自己渲染历史 + 今晚，这里避开以免重复） */
+function wolfHistoryForDay(ctx) {
+  if (ctx.role !== "wolf" || ctx.phase === "wolf") return "";
+  const log = Array.isArray(ctx.wolfChatLog) ? ctx.wolfChatLog : [];
+  if (!log.length) return "";
+  return (
+    "【狼队密聊记录（只有狼队可见，对好人保密；白天的发言与投票参考与队友对好的口径）】\n" +
+    log.map(function (m) { return "第" + m.n + "夜 " + m.seat + " 号：" + m.text; }).join("\n")
+  );
+}
 
 /* 女巫任务：按药剂状态与刀口可见性分支（features.md §4.1.3 / §5.2） */
 function witchTask(ctx) {
@@ -558,13 +576,14 @@ export function buildMessages(history, roleCard, phase) {
   if (roleCard.knifeTarget !== undefined && roleCard.knifeTarget !== null && !isSeat(roleCard.knifeTarget)) {
     fail("roleCard.knifeTarget 必须是座位号或 null（仅女巫且解药未用时由调用方填）");
   }
-  /* 狼队密聊与投票（仅狼座在 wolf 阶段由调用方携带；白名单校验防串台） */
-  if (roleCard.wolfChat !== undefined && roleCard.wolfChat !== null) {
-    if (!Array.isArray(roleCard.wolfChat)) fail("roleCard.wolfChat 必须是数组");
-    roleCard.wolfChat.forEach(function (m, i) {
-      if (!m || typeof m !== "object") fail("roleCard.wolfChat[" + i + "] 必须是对象");
-      if (!isSeat(m.seat)) fail("roleCard.wolfChat[" + i + "].seat 非法");
-      str(m.text, "roleCard.wolfChat[" + i + "].text", 60);
+  /* 狼队密聊全程日志（仅狼座由调用方携带：历史 + 当夜，跨夜保留；白名单校验防串台） */
+  if (roleCard.wolfChatLog !== undefined && roleCard.wolfChatLog !== null) {
+    if (!Array.isArray(roleCard.wolfChatLog)) fail("roleCard.wolfChatLog 必须是数组");
+    roleCard.wolfChatLog.forEach(function (m, i) {
+      if (!m || typeof m !== "object") fail("roleCard.wolfChatLog[" + i + "] 必须是对象");
+      if (!isSeat(m.n)) fail("roleCard.wolfChatLog[" + i + "].n 非法");
+      if (!isSeat(m.seat)) fail("roleCard.wolfChatLog[" + i + "].seat 非法");
+      str(m.text, "roleCard.wolfChatLog[" + i + "].text", 60);
     });
   }
   if (roleCard.wolfVotes !== undefined && roleCard.wolfVotes !== null) {
@@ -610,7 +629,7 @@ export function buildMessages(history, roleCard, phase) {
     wolvesAlive: role === "wolf" && Array.isArray(roleCard.wolves)
       ? roleCard.wolves.filter(function (s) { return s !== seat && fold.alive.indexOf(s) >= 0; })
       : null,
-    wolfChat: role === "wolf" && Array.isArray(roleCard.wolfChat) ? roleCard.wolfChat : null,
+    wolfChatLog: role === "wolf" && Array.isArray(roleCard.wolfChatLog) ? roleCard.wolfChatLog : null,
     wolfVotes: role === "wolf" && roleCard.wolfVotes && typeof roleCard.wolfVotes === "object" ? roleCard.wolfVotes : null,
     captain: role === "wolf" && isSeat(roleCard.captain) ? roleCard.captain : null
   };
@@ -650,6 +669,7 @@ export function buildMessages(history, roleCard, phase) {
       + (isNight ? "夜里你只知道你身份卡上的私有信息与下面任务告诉你的内容，不要猜测其他人的夜间行动。" : "")
       + rosterLine,
     "",
+    wolfHistoryForDay(ctx),
     TASK_PROMPTS[phase](ctx),
     phase === "witch" ? witchFormat(ctx)
       : phase === "wolf" ? WOLF_CHAT_FORMAT

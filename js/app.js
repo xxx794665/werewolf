@@ -68,9 +68,9 @@ function privateOf(g, seat) {
   const you = { seat, alive: !!meP.alive, role: meP.role };
   if (meP.role === "werewolf") {
     you.wolves = g.players.filter((p) => p && p.role === "werewolf").map((p) => p.seat);
+    if (meP.alive) you.wolfChatLog = g.wolfChatLog || []; // §4.1.1 跨夜保留，白天可回看
     if (g.phase === "night" && meP.alive && g.night) {
       if (g.night.blade != null) you.blade = g.night.blade;
-      you.wolfChat = g.night.wolfChat || []; // §4.1.1 狼队密聊与定刀投票（仅存活狼座）
       you.wolfVotes = g.night.wolfVotes || {};
       you.captain = game.wolfCaptain(g);
     }

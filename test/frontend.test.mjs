@@ -9,6 +9,9 @@
  *      确定性回退推进，直到 revealed（验证 shared/game.js 的 solo 开关与
  *      app.js soloDrive 同款的驱动循环收敛）
  *   5. ui.js 玩家标签：scope 生命周期（换局清零 / 刷新复原）+ 校验上限
+ *   6. 狼队密聊历史进提示词：夜里分组渲染 / 白天注入 / 非狼白名单忽略（§4.1.1 修订）
+ *   7. ui.js 投票记录卡：voteHistory 公开事件流重组（§5.14：主/PK 分轮、
+ *      tie 认领结果不被成对 exile{null} 覆盖、得票重算排序、平安日 / 进行中）
  * 运行：node --test test/frontend.test.mjs
  * ============================================================ */
 
@@ -246,4 +249,89 @@ test("玩家标签：增删开关 / 校验上限 / scope 切换清零与刷新�
   mem.set("ww_tags_BADJSON", "{bad json");
   ui.enterTagScope("BADJSON");
   assert.deepEqual(ui.seatTags(1), []);
+});
+
+/* ---------- 6. 狼队密聊历史进提示词（§4.1.1 修订：跨夜保留，白天任务也带） ---------- */
+
+test("狼人提示词：密聊日志夜里分组渲染、白天任务注入、非狼座位一律忽略", async () => {
+  const { buildMessages } = await import("../shared/prompts.js");
+  const history = [{ day: 1, t: "digest", text: "第 1 天平安日，无人出局。", dead: [] }];
+  const card = {
+    seat: 3,
+    role: "wolf",
+    wolves: [3, 7],
+    wolfChatLog: [
+      { n: 1, seat: 3, text: "昨晚刀 5 号，白天我来带节奏" },
+      { n: 2, seat: 7, text: "今晚刀 1 号，我跳预言家" },
+    ],
+  };
+
+  /* 夜里 wolf 任务：历史与今晚分组渲染（fold.day=1 → 第 2 夜） */
+  const nightUser = buildMessages(history, card, "wolf")[1].content;
+  assert.match(nightUser, /【狼队密聊历史（只有狼队可见，跨夜保留）】/);
+  assert.match(nightUser, /第1夜 3 号：昨晚刀 5 号，白天我来带节奏/);
+  assert.match(nightUser, /【今晚密聊】/);
+  assert.match(nightUser, /7 号：今晚刀 1 号，我跳预言家/);
+
+  /* 白天发言任务：注入全程密聊记录（与队友对口径的依据） */
+  const dayUser = buildMessages(history, card, "speak")[1].content;
+  assert.match(dayUser, /【狼队密聊记录（只有狼队可见/);
+  assert.match(dayUser, /第2夜 7 号：今晚刀 1 号，我跳预言家/);
+
+  /* 白名单：非狼座位带狼字段一律忽略，绝不进提示词 */
+  const other = buildMessages(history, { seat: 4, role: "villager", wolfChatLog: [{ n: 1, seat: 4, text: "不该出现" }] }, "speak");
+  assert.ok(!other[1].content.includes("狼队密聊"), "平民提示词绝不含狼队密聊");
+  assert.ok(!other[1].content.includes("不该出现"));
+});
+
+/* ---------- 7. 投票记录卡：公开事件流 → 按轮次重组（§5.14） ---------- */
+
+test("voteHistory：主/PK 分轮、tie 认领结果、得票重算排序、平安日与进行中", async () => {
+  const ui = await import("../js/ui.js");
+  const rounds = ui.voteHistory([
+    { t: "speech", day: 1, seat: 2, text: "非投票事件忽略" },
+    { t: "vote", day: 1, voter: 1, target: 5 },
+    { t: "vote", day: 1, voter: 2, target: 5 },
+    { t: "vote", day: 1, voter: 3, target: 2 },
+    { t: "vote", day: 1, voter: 4, target: null },
+    { t: "tie", day: 1, seats: [2, 5] },
+    { t: "exile", day: 1, seat: null }, // 进 PK 时与 tie 成对发出，不得覆盖为平安日
+    { t: "pk_speak", day: 1, seat: 2, text: "我才是好人" },
+    { t: "vote", day: 1, voter: 1, target: 5 },
+    { t: "vote", day: 1, voter: 4, target: 2 },
+    { t: "vote", day: 1, voter: 6, target: 5 },
+    { t: "exile", day: 1, seat: 5 },
+    { t: "vote", day: 2, voter: 1, target: null },
+    { t: "vote", day: 2, voter: 2, target: null },
+    { t: "exile", day: 2, seat: null }, // 全弃 → 平安日
+    { t: "vote", day: 3, voter: 1, target: 7 }, // 第 3 天进行中
+  ]);
+  assert.equal(rounds.length, 4);
+  assert.deepEqual(rounds[0], {
+    day: 1,
+    kind: "main",
+    votes: [
+      { voter: 1, target: 5 },
+      { voter: 2, target: 5 },
+      { voter: 3, target: 2 },
+      { voter: 4, target: null },
+    ],
+    outcome: { type: "pk", seats: [2, 5] },
+    tally: [
+      { seat: 5, count: 2 },
+      { seat: 2, count: 1 },
+    ],
+  });
+  assert.equal(rounds[1].kind, "pk"); // tie 后的同日 vote 进 PK 轮
+  assert.deepEqual(rounds[1].outcome, { type: "exile", seat: 5 });
+  assert.deepEqual(rounds[1].tally, [
+    { seat: 5, count: 2 },
+    { seat: 2, count: 1 },
+  ]);
+  assert.equal(rounds[2].kind, "main"); // 换天回到主投票
+  assert.deepEqual(rounds[2].outcome, { type: "peaceful" });
+  assert.deepEqual(rounds[2].tally, []); // 全员弃票 → 得票榜为空
+  assert.equal(rounds[3].outcome, null); // 无 tie/exile 收尾 = 进行中
+  assert.deepEqual(ui.voteHistory([]), []);
+  assert.deepEqual(ui.voteHistory(null), []);
 });

@@ -62,9 +62,9 @@ ADR-0003（roleCard 来源 = 单机本地内核状态 / 联机 DO 自持状态�
                                 //   （与身份无关），进 system 的【你的口吻】；缺席回退座位轮换
 
   "wolves": [2, 5, 6],          // 仅 wolf：全体狼座位号（含本人、含已死队友）
-  "wolfChat": [                 // 仅 wolf 且仅 wolf 阶段（§4.1.1）：狼队密聊记录（天亮即清）
-    { "seat": 2, "text": "刀 3 号，白天我跳预言家" }
-  ],
+  "wolfChatLog": [              // 仅 wolf、全阶段携带（§4.1.1 修订）：狼队密聊全程日志，
+    { "n": 1, "seat": 2, "text": "刀 3 号，白天我跳预言家" }  // 跨夜保留（n = 第几夜）；
+  ],                            //   夜里 wolf 任务分组渲染历史+今晚，白天任务注入全程记录
   "wolfVotes": { "2": 3 },      // 仅 wolf 且仅 wolf 阶段：已投狼票（座位号 → 目标）
   "captain": 2,                 // 仅 wolf 且仅 wolf 阶段：狼队长座位号（平票裁定者）
   "checks": [                   // 仅 seer：本人验人历史（可省略 = 还没验过）
@@ -138,8 +138,10 @@ buildMessages(history, roleCard, phase) →
   空历史（第一夜行动）= 第 1 夜，聊天记录渲染为「（游戏刚开始，还没有任何公开事件。）」。
 - **存活推导**：`1–9 − (deaths ∪ exile ∪ hunter.target ∪ digest.dead)`。
 - **私有信息归属**：`wolves` / `checks` / 药状态进 system 消息（本局恒定的事实）；
-  `knifeTarget` 只进 witch 阶段的 user 消息（当晚瞬态情报）；`wolfChat` / `wolfVotes` /
-  `captain` 只进 wolf 阶段的 user 消息（狼座合法私有视角，天亮即清）。
+  `knifeTarget` 只进 witch 阶段的 user 消息（当晚瞬态情报）；`wolfVotes` / `captain`
+  只进 wolf 阶段的 user 消息；`wolfChatLog`（§4.1.1 修订：跨夜保留）——wolf 阶段分组渲染
+  「历史 + 今晚」，狼座的白天任务（发言 / 投票 / 遗言等）注入全程记录供对口径，
+  非狼座位一律忽略（白名单）。
 - **每座位人格（ADR-0009 修订）**：`roleCard.persona` 优先——开局名册（`shared/roster.js`
   `drawRoster`）每局随机抽取，8 款言行风格人格（ADR-0007）洗牌**不重复**，一局之内
   两个 AI 不共用一款口吻（不再按座位号 `PERSONAS[(seat-1) % 8]` 确定性分配）；roleCard

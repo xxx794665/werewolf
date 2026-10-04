@@ -350,8 +350,8 @@ export function roleCardOf(g, seat) {
   if (p.persona) card.persona = p.persona;
   if (p.role === "werewolf") {
     card.wolves = g.players.filter((x) => x && x.role === "werewolf").map((x) => x.seat);
+    card.wolfChatLog = g.wolfChatLog || []; // §4.1.1 狼队私有频道全程日志（跨夜保留；白天任务也带）
     if (g.phase === "night" && g.subPhase === "wolf" && g.night) {
-      card.wolfChat = g.night.wolfChat || []; // §4.1.1 狼自己的私有频道进 roleCard（上下文铁律不破）
       card.wolfVotes = g.night.wolfVotes || {};
       card.captain = game.wolfCaptain(g);
     }

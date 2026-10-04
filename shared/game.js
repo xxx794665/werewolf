@@ -28,8 +28,10 @@
  *     persona = AI 座位的言行风格描述（开局名册抽取，shared/roster.js；
  *     只进 AI 提示词，快照按座位裁剪后不透出，ADR-0009）
  *   rng: mulberry32 状态（发牌洗牌与确定性回退共用，测试可复现）
- *   night: 当夜瞬时 { blade, saved, poison, wolfChat, wolfVotes }，天亮结算后清空
- *     （wolfChat = 狼队密聊记录、wolfVotes = 狼队定刀投票，仅狼座快照可见，§4.1.5）
+ *   night: 当夜瞬时 { blade, saved, poison, wolfVotes }，天亮结算后清空
+ *     （wolfVotes = 狼队定刀投票，仅狼座快照可见，§4.1.5）
+ *   wolfChatLog: 狼队密聊全程日志 [{ n, seat, text }]，跨夜保留不清空，
+ *     仅存活狼座可见、白天可回看（§4.1.1 修订口径；n = 第几夜，与 seerChecks.night 同口径）
  *   seerChecks / witch / queue / votes / pkCandidates / pendingHunter /
  *   pendingExile / winner / reason
  * ============================================================ */
@@ -311,7 +313,8 @@ function hStart(state, a) {
   s.phase = 'night';
   s.day = 1;
   s.subPhase = 'wolf';
-  s.night = { blade: null, saved: false, poison: null, wolfChat: [], wolfVotes: {} };
+  s.night = { blade: null, saved: false, poison: null, wolfVotes: {} };
+  s.wolfChatLog = []; // §4.1.1 狼队密聊全程日志（跨夜保留，不随天亮清空）
   s.witch = { antidote: 1, poison: 1 };
   s.seerChecks = [];
   s.queue = [];
@@ -327,24 +330,25 @@ function hStart(state, a) {
 /* ---------- 夜晚（§4.1：狼队密聊+投票定刀 → seer → witch → 结算） ---------- */
 
 /**
- * §4.1.1 狼队密聊：仅存活狼人可见的夜间频道（night.wolfChat，天亮即清）。
- * 不产生公开事件（§4.1.5）；每狼每晚至多 WOLF_CHAT_TURNS 条、每条 ≤WOLF_CHAT_MAX 字。
+ * §4.1.1 狼队密聊：仅存活狼人可见的夜间频道，写入 wolfChatLog 跨夜保留
+ * （白天可回看历史、不能发言）。不产生公开事件（§4.1.5）；
+ * 每狼每晚至多 WOLF_CHAT_TURNS 条、每条 ≤WOLF_CHAT_MAX 字。
  */
 function hWolfChat(state, a) {
   const s = clone(state);
   if (s.phase !== 'night' || s.subPhase !== 'wolf') return fail(state, '当前不是狼队密聊时间');
-  // 部署过渡兜底：旧版持久化房间的 night 没有这两个字段，推进前补齐
-  if (!Array.isArray(s.night.wolfChat)) s.night.wolfChat = [];
+  // 部署过渡兜底：旧版持久化房间 / 旧单机存档没有这个字段，推进前补齐
+  if (!Array.isArray(s.wolfChatLog)) s.wolfChatLog = [];
   if (!s.night.wolfVotes || typeof s.night.wolfVotes !== 'object') s.night.wolfVotes = {};
   const me = isAlive(s, a.seat);
   if (!me || me.role !== 'werewolf') return fail(state, '只有存活狼人可以参与密聊');
   const text = typeof a.text === 'string' ? a.text.trim() : '';
   if (!text) return fail(state, '密聊内容不能为空');
   if (text.length > WOLF_CHAT_MAX) return fail(state, `密聊每条不超过 ${WOLF_CHAT_MAX} 字`);
-  if (s.night.wolfChat.filter((m) => m.seat === a.seat).length >= WOLF_CHAT_TURNS) {
+  if (s.wolfChatLog.filter((m) => m.n === s.day && m.seat === a.seat).length >= WOLF_CHAT_TURNS) {
     return fail(state, `今晚你的密聊条数已用完（${WOLF_CHAT_TURNS} 条）`);
   }
-  s.night.wolfChat.push({ seat: a.seat, text });
+  s.wolfChatLog.push({ n: s.day, seat: a.seat, text });
   return ok(s);
 }
 
@@ -671,7 +675,7 @@ function nextNight(s, events) {
   s.day += 1;
   s.phase = 'night';
   s.subPhase = 'wolf';
-  s.night = { blade: null, saved: false, poison: null, wolfChat: [], wolfVotes: {} };
+  s.night = { blade: null, saved: false, poison: null, wolfVotes: {} };
   s.queue = [];
   s.votes = null;
   s.pkCandidates = null;

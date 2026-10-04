@@ -12,6 +12,8 @@
  *   - 顶栏滚动收拢：滚动 >60px 给 #topbar 加 .is-collapsed。
  *   - 玩家标签：座位行内私人笔记（预置 + 自定义，只存 localStorage，
  *     生命周期 = 所属对局），renderSeats 内联编辑器 + 快照重渲染保展开态。
+ *   - 投票记录卡（§5.14）：voteHistory 纯函数把公开事件流按天 / 轮次重组成
+ *     票型速查，renderVoteHistory 渲染折叠卡（仿狼队密聊卡，纯前端重组）。
  * 安全：玩家昵称与 AI 发言是不可信文本，一律 textContent，绝不 innerHTML；
  *   innerHTML 只用于本仓库 icons.js 的 SVG 常量。
  * node --test 可 import（顶层不碰 document）。
@@ -264,7 +266,12 @@ function renderLog(snap) {
   const box = $("log");
   box.textContent = "";
   const events = (snap.events || []).slice(-200); // 防长局 DOM 膨胀
-  for (const ev of events) {
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    const prev = events[i - 1];
+    /* 主投票平票进 PK 时 vote_result 成对落成 tie + exile{null}（§1.3 schema 不动）：
+       后者并非平安日（PK 尚未进行），票型已由 tie 行完整表达，事件流里跳过不误导 */
+    if (ev.t === "exile" && ev.seat == null && prev && prev.t === "tie" && prev.day === ev.day) continue;
     box.append(logItem(snap, ev));
   }
 }
@@ -552,13 +559,10 @@ function renderAction(snap, actions) {
     }
     case "wolf": {
       panel.append(el("p", "action-title", "狼队密聊（只有狼人可见）· 投票定刀"));
-      /* §4.1.1 密聊记录：狼座私有快照字段，轮询实时刷新 */
-      const chat = you && Array.isArray(you.wolfChat) ? you.wolfChat : [];
+      /* §4.1.1 密聊全程日志：狼座私有快照字段，轮询实时刷新；跨夜保留，按夜分组 */
+      const chatLog = you && Array.isArray(you.wolfChatLog) ? you.wolfChatLog : [];
       const chatBox = el("ul", "wolf-chat");
-      if (chat.length === 0) chatBox.append(el("li", "wolf-chat-line wolf-chat-empty", "今晚队友还没说话，开个头？"));
-      for (const m of chat) {
-        chatBox.append(el("li", "wolf-chat-line" + (m.seat === meSeat ? " me" : ""), `${m.seat} 号：${m.text}`));
-      }
+      fillWolfChat(chatBox, chatLog, snap.day, meSeat);
       panel.append(chatBox);
       /* 密聊输入：单步提交（同白天发言，不在不可逆清单） */
       const row = el("div", "chat-input-row");
@@ -649,10 +653,115 @@ function renderAction(snap, actions) {
 }
 
 /** 对局整屏渲染。actions 见 app.js（单机本地提交 / 联机 act 提交共用此形状）。 */
+/** 狼队密聊列表填充（§4.1.1 修订：跨夜保留，按夜分组；tonightN = 当夜号，传 null = 白天纯历史回看）。 */
+function fillWolfChat(box, log, tonightN, meSeat) {
+  box.textContent = "";
+  let lastN = null;
+  for (const m of log) {
+    if (m.n !== lastN) {
+      lastN = m.n;
+      box.append(el("li", "wolf-chat-night", m.n === tonightN ? `第 ${m.n} 夜（今晚）` : `第 ${m.n} 夜`));
+    }
+    box.append(el("li", "wolf-chat-line" + (m.seat === meSeat ? " me" : ""), `${m.seat} 号：${m.text}`));
+  }
+  if (tonightN != null && lastN !== tonightN) {
+    box.append(el("li", "wolf-chat-night", `第 ${tonightN} 夜（今晚）`));
+    box.append(el("li", "wolf-chat-line wolf-chat-empty", "今晚队友还没说话，开个头？"));
+  } else if (log.length === 0) {
+    box.append(el("li", "wolf-chat-line wolf-chat-empty", "还没有任何密聊记录。"));
+  }
+}
+
+/** 白天（及非狼行动夜）的狼队密聊历史卡：只读回看（§4.1.1 修订）；狼夜行动面板带实时密聊时不重复。
+ * 注意夜里快照不露 subPhase（§4.1.6），判重只能看 action.kind。 */
+function renderWolfHistory(snap) {
+  const card = $("wolf-history");
+  const you = snap.you;
+  const log = you && Array.isArray(you.wolfChatLog) ? you.wolfChatLog : [];
+  const isWolfAlive = !!(you && you.role === "werewolf" && you.alive);
+  const wolfNightPanel = !!(snap.action && snap.action.kind === "wolf");
+  const show = isWolfAlive && log.length > 0 && !wolfNightPanel && snap.phase !== "lobby" && snap.phase !== "revealed";
+  card.classList.toggle("hidden", !show);
+  if (show) fillWolfChat($("wolf-history-list"), log, null, snap.mySeat);
+}
+
+/* ---------- 投票记录卡（§5.14）：按天 / 轮次分组的票型速查 ----------
+ * 数据 = 公开事件流里既有的 vote / tie / exile 事件（§8.1 公开历史，快照全量自带，
+ * 凡能看事件流的人含死者都能看本卡，不加存活限制——过滤无 secrecy 收益）；纯前端
+ * 重组：不改内核、不落新数据、ai-prompts §1.3 事件 schema 不动，进行中老对局立即可用。
+ * 重组口径：toHistory 落库丢了 main/pk 轮次与票数榜——同一天内 tie 事件即主投票与
+ * PK 投票的分界（vote_result 进 PK 时 tie 与 exile{null} 成对发出，先到的 tie 认领
+ * 该轮结果，成对的 exile{null} 忽略）；票数从逐人 vote 重算，与内核 tally 同序
+ * （票多在前、同票座位号小在前）。 */
+
+/** 公开事件流 → [{ day, kind: "main"|"pk", votes: [{voter,target}], tally: [{seat,count}], outcome }]；
+ *  outcome = null（进行中）/ {type:"pk",seats} / {type:"exile",seat} / {type:"peaceful"}。 */
+export function voteHistory(events) {
+  const rounds = [];
+  let cur = null;
+  for (const ev of events || []) {
+    if (ev.t === "vote") {
+      if (!cur || cur.day !== ev.day || cur.outcome) {
+        cur = { day: ev.day, kind: cur && cur.day === ev.day ? "pk" : "main", votes: [], outcome: null };
+        rounds.push(cur);
+      }
+      cur.votes.push({ voter: ev.voter, target: ev.target == null ? null : ev.target });
+    } else if (ev.t === "tie" || ev.t === "exile") {
+      if (!cur || cur.day !== ev.day || cur.outcome) continue;
+      cur.outcome = ev.t === "tie"
+        ? { type: "pk", seats: ev.seats }
+        : ev.seat == null ? { type: "peaceful" } : { type: "exile", seat: ev.seat };
+    }
+  }
+  for (const r of rounds) {
+    const cnt = new Map();
+    for (const v of r.votes) if (v.target != null) cnt.set(v.target, (cnt.get(v.target) || 0) + 1);
+    r.tally = [...cnt.entries()]
+      .map(([seat, count]) => ({ seat, count }))
+      .sort((a, b) => b.count - a.count || a.seat - b.seat);
+  }
+  return rounds;
+}
+
+function renderVoteHistory(snap) {
+  const card = $("vote-history");
+  const rounds = voteHistory(snap.events);
+  const show = rounds.length > 0 && snap.phase !== "lobby" && snap.phase !== "revealed";
+  card.classList.toggle("hidden", !show);
+  if (!show) return;
+  const box = $("vote-history-list");
+  box.textContent = "";
+  for (const r of rounds) {
+    const div = el("div", "vote-round");
+    const head = el("div", "vote-round-head", `第 ${r.day} 天 · ${r.kind === "pk" ? "PK 投票" : "主投票"}`);
+    if (!r.outcome) head.append(el("span", "vote-ongoing", "（进行中）"));
+    div.append(head);
+    const ul = el("ul", "vote-votes");
+    for (const v of r.votes) {
+      ul.append(el("li", null, `${v.voter} 号 → ${v.target == null ? "弃票" : `${v.target} 号`}`));
+    }
+    div.append(ul);
+    if (r.tally.length) {
+      div.append(el("div", "vote-round-meta", "得票：" + r.tally.map((t) => `${t.seat} 号 ${t.count} 票`).join("、")));
+    } else if (r.outcome) {
+      div.append(el("div", "vote-round-meta", "得票：无（全员弃票）")); // 已结算且零得票 = 全弃
+    }
+    if (r.outcome) {
+      const text = r.outcome.type === "pk"
+        ? `结果：平票，${r.outcome.seats.map((s) => `${s} 号`).join("、")} 进入 PK`
+        : r.outcome.type === "exile" ? `结果：放逐 ${r.outcome.seat} 号` : "结果：无人出局（平安日）";
+      div.append(el("div", "vote-round-meta", text));
+    }
+    box.append(div);
+  }
+}
+
 export function renderGame(snap, actions) {
   renderPhaseBanner(snap);
   renderIdCard(snap);
   renderLog(snap);
+  renderWolfHistory(snap);
+  renderVoteHistory(snap);
   renderSeats(snap);
   renderAction(snap, actions);
 }
