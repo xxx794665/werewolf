@@ -87,32 +87,39 @@ function privateOf(g, seat) {
   return you;
 }
 
+/** 单机真人座位（§3 开局座位洗牌后不再恒为 1，按 isAI 反查）。 */
+function soloHumanSeat() {
+  const i = solo ? solo.state.players.findIndex((p) => p && !p.isAI) : -1;
+  return i >= 0 ? i + 1 : 1;
+}
+
 /** 单机本地构造与联机快照同形的视图（ui.js 不区分两种来源）。 */
 function soloSnap() {
   const g = solo.state;
   const night = g.phase === "night";
   const revealed = g.phase === "revealed";
-  const meP = g.players[0]; // 单机真人恒为 1 号
+  const mySeat = soloHumanSeat();
+  const meP = g.players[mySeat - 1];
   const pending = g.phase === "night" || g.phase === "day" ? game.pendingSeat(g) : null;
   /* 死者观战亮牌时机：自己还有待提交行动（遗言 / 开枪）时只看自己身份，
      提交后可见全员身份（§7.8，2026-10-03 试玩反馈定的时机） */
-  const spectator = g.phase !== "lobby" && !revealed && !meP.alive && pending !== 1;
+  const spectator = g.phase !== "lobby" && !revealed && !meP.alive && pending !== mySeat;
   const s = {
     solo: true,
     code: null,
-    mySeat: 1,
+    mySeat,
     phase: g.phase,
     day: g.day,
     players: g.players.map((p) => {
       const e = { seat: p.seat, nick: p.nick, isAI: !!p.isAI, alive: !!p.alive };
-      if (revealed || spectator || p.seat === 1) {
+      if (revealed || spectator || p.seat === mySeat) {
         e.role = p.role;
         if (p.death) e.death = p.death;
       }
       return e;
     }),
     events: solo.log,
-    you: privateOf(g, 1),
+    you: privateOf(g, mySeat),
   };
   if (!night) {
     s.subPhase = g.subPhase; // §4.1.6：夜里不露子阶段
@@ -128,7 +135,7 @@ function soloSnap() {
     s.winner = g.winner;
     s.reason = g.reason;
   }
-  if (pending === 1 && ai.phaseOf(g)) s.action = { kind: ai.phaseOf(g) };
+  if (pending === mySeat && ai.phaseOf(g)) s.action = { kind: ai.phaseOf(g) };
   else if (meP.alive && meP.role === "werewolf" && g.phase === "night" && g.subPhase === "wolf") {
     s.action = { kind: "wolf" }; // §4.1.1 狼队密聊+投票全员开放（不按 pending 排队）
   }
@@ -172,15 +179,15 @@ function soloSubmit(action) {
 }
 
 const soloActions = {
-  speak: (text) => soloSubmit({ type: "speak", seat: 1, text }),
-  vote: (target) => soloSubmit({ type: "vote", seat: 1, target }),
-  wolfChat: (text) => soloSubmit({ type: "wolf_chat", seat: 1, text }),
-  wolfTarget: (target) => soloSubmit({ type: "wolf_target", seat: 1, target }),
-  seerCheck: (target) => soloSubmit({ type: "seer_check", seat: 1, target }),
-  witchSave: () => soloSubmit({ type: "witch_move", seat: 1, move: "save" }),
-  witchPoison: (target) => soloSubmit({ type: "witch_move", seat: 1, move: "poison", target }),
-  witchSkip: () => soloSubmit({ type: "witch_move", seat: 1, move: "skip" }),
-  hunterShoot: (target) => soloSubmit({ type: "hunter_shoot", seat: 1, target }),
+  speak: (text) => soloSubmit({ type: "speak", seat: soloHumanSeat(), text }),
+  vote: (target) => soloSubmit({ type: "vote", seat: soloHumanSeat(), target }),
+  wolfChat: (text) => soloSubmit({ type: "wolf_chat", seat: soloHumanSeat(), text }),
+  wolfTarget: (target) => soloSubmit({ type: "wolf_target", seat: soloHumanSeat(), target }),
+  seerCheck: (target) => soloSubmit({ type: "seer_check", seat: soloHumanSeat(), target }),
+  witchSave: () => soloSubmit({ type: "witch_move", seat: soloHumanSeat(), move: "save" }),
+  witchPoison: (target) => soloSubmit({ type: "witch_move", seat: soloHumanSeat(), move: "poison", target }),
+  witchSkip: () => soloSubmit({ type: "witch_move", seat: soloHumanSeat(), move: "skip" }),
+  hunterShoot: (target) => soloSubmit({ type: "hunter_shoot", seat: soloHumanSeat(), target }),
 };
 
 function renderSolo() {

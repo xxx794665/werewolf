@@ -119,14 +119,46 @@ test('发牌：同种子同发牌、异种子不同；板子构成 3狼3民预�
   assert.equal(a.state.phase, 'night');
   assert.equal(a.state.day, 1);
   assert.equal(a.state.subPhase, 'wolf');
-  // §7.5：AI-1…AI-6 按补位（座位升序）分配，昵称即公开 AI 标识
-  assert.deepEqual(a.state.players.slice(3).map((p) => p.nick), ['AI-1', 'AI-2', 'AI-3', 'AI-4', 'AI-5', 'AI-6']);
-  assert.ok(a.state.players.slice(3).every((p) => p.isAI));
-  assert.ok(a.state.players.slice(0, 3).every((p) => !p.isAI));
+  // §7.5：AI-1…AI-6 按补位顺序命名（开局座位洗牌后座位号与补位顺序解耦，按集合断言）
+  assert.deepEqual(
+    a.state.players.filter((p) => p.isAI).map((p) => p.nick).sort(),
+    ['AI-1', 'AI-2', 'AI-3', 'AI-4', 'AI-5', 'AI-6']
+  );
+  assert.equal(a.state.players.filter((p) => p.isAI).length, 6);
+  assert.equal(a.state.players.filter((p) => !p.isAI).length, 3);
   // game_start 事件不带 role（暗牌）
   const gs = a.events.find((e) => e.type === 'game_start');
   assert.equal(gs.players.length, 9);
   assert.ok(gs.players.every((p) => !('role' in p)));
+});
+
+test('开局座位洗牌（2026-10-05 试玩反馈）：真人座位随 seed 分布、seat↔index 双射、同 seed 可复现、名册对随玩家迁移', () => {
+  const start = (seed, roster) => {
+    let s = game.advance(game.createInitialState(), { type: 'join', nick: '独行', uid: 'u-x' }).state;
+    s = adv(s, { type: 'ready', seat: 1, ready: true }).state;
+    const r = adv(s, { type: 'start', seed, solo: true, roster });
+    assert.equal(r.error, null);
+    return r.state;
+  };
+  const humanSeats = new Set();
+  for (const seed of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]) {
+    const s = start(seed);
+    assert.equal(s.players.length, 9);
+    s.players.forEach((p, i) => assert.equal(p.seat, i + 1, '洗牌后 seat === index + 1 不变式'));
+    assert.equal(s.players.filter((p) => !p.isAI).length, 1);
+    const cnt = {};
+    for (const p of s.players) cnt[p.role] = (cnt[p.role] || 0) + 1;
+    assert.deepEqual(cnt, game.BOARD, '洗牌不改角色构成');
+    humanSeats.add(s.players.find((p) => !p.isAI).seat);
+  }
+  assert.ok(humanSeats.size > 1, '多个 seed 下真人座位不应固定');
+  // 同 seed 完全可复现（座次 + 发牌）
+  const key = (st) => st.players.map((p) => `${p.seat}:${p.nick}:${p.role}`).join('|');
+  assert.equal(key(start(777)), key(start(777)), '同 seed 座次与发牌完全可复现');
+  // 名册对随玩家迁移：AI 网名与人格不因洗牌拆对
+  const named = start(888, [{ nick: '逻辑闭环怪', persona: '盘逻辑' }]).players.find((p) => p.nick === '逻辑闭环怪');
+  assert.equal(named.persona, '盘逻辑');
+  assert.ok(named.isAI);
 });
 
 /* ---------------- 夜晚结算（§4.1 / §5.2 / §5.3） ---------------- */
@@ -619,18 +651,23 @@ test('开局名册：AI 昵称与人格按补位顺序对位，与发牌身份�
   const r = adv(s, { type: 'start', seed: 42, solo: true, roster });
   assert.equal(r.error, null);
   const ais = r.state.players.filter((p) => p.isAI);
-  assert.deepEqual(ais.map((p) => p.nick), ['逻辑闭环怪', '先投为敬', 'AI-3', 'AI-4', 'AI-5', 'AI-6', 'AI-7', 'AI-8']);
-  assert.equal(ais[0].persona, PERSONAS[0]);
-  assert.equal(ais[1].persona, undefined);
-  assert.ok(ais.slice(2).every((p) => p.persona === undefined), '回退座位不带人格');
-  // 网名与人格只贴人格池、与身份无关：同一座位抽什么身份都带同一个网名
+  // 开局座位洗牌后 AI 座位号与补位顺序解耦：按集合断言网名，按网名回查人格成对迁移
+  assert.deepEqual(
+    ais.map((p) => p.nick).sort(),
+    [...roster.map((e) => e.nick), 'AI-3', 'AI-4', 'AI-5', 'AI-6', 'AI-7', 'AI-8'].sort()
+  );
+  const byNick = (st, nick) => st.players.find((p) => p.nick === nick);
+  assert.equal(byNick(r.state, '逻辑闭环怪').persona, PERSONAS[0]);
+  assert.equal(byNick(r.state, '先投为敬').persona, undefined);
+  assert.ok(ais.filter((p) => /^AI-\d$/.test(p.nick)).every((p) => p.persona === undefined), '回退座位不带人格');
+  // 网名与人格只贴人格池、与身份无关：同一 AI 抽什么身份都带同一个网名
   const rolesA = r.state.players.map((p) => p.role);
   const r2 = adv(s, { type: 'start', seed: 43, solo: true, roster }).state;
-  assert.equal(r2.players[1].nick, '逻辑闭环怪');
+  assert.equal(byNick(r2, '逻辑闭环怪').persona, PERSONAS[0], '不同 seed 下名册对仍成立');
   assert.notDeepEqual(r2.players.map((p) => p.role), rolesA, '种子不同发牌不同');
   // game_start 公开事件带新网名（不含 role / persona，暗牌口径不变）
   const startEv = r.events.find((e) => e.type === 'game_start');
-  assert.equal(startEv.players[1].nick, '逻辑闭环怪');
+  assert.ok(startEv.players.some((p) => p.nick === '逻辑闭环怪'));
   assert.ok(startEv.players.every((p) => !('role' in p) && !('persona' in p)));
 });
 
@@ -655,7 +692,7 @@ test('开局名册：形状非法严进拒绝开局（不静默降级）；省�
   const plain = adv(ready, { type: "start", seed: 42, solo: true });
   assert.equal(plain.error, null);
   assert.deepEqual(
-    plain.state.players.filter((p) => p.isAI).map((p) => p.nick),
+    plain.state.players.filter((p) => p.isAI).map((p) => p.nick).sort(),
     ['AI-1', 'AI-2', 'AI-3', 'AI-4', 'AI-5', 'AI-6', 'AI-7', 'AI-8']
   );
   assert.ok(plain.state.players.every((p) => p.persona === undefined));
@@ -666,13 +703,14 @@ test('开局名册：形状非法严进拒绝开局（不静默降级）；省�
 test('狼队长：真人优先，多人取座位号最小；否则座位号最小 AI 狼', () => {
   const { state: s0 } = newRoom(['张三', '李四', '王五'], 42);
   const wolves = seatsOf(s0, 'werewolf');
-  const humanWolves = wolves.filter((x) => x <= 3); // 座位 1–3 是真人
+  const humanSeats = new Set(s0.players.filter((p) => p && !p.isAI).map((p) => p.seat));
+  const humanWolves = wolves.filter((x) => humanSeats.has(x)); // 真人狼（开局座位洗牌后不再固定 1–3）
   const expect = humanWolves.length > 0 ? Math.min(...humanWolves) : Math.min(...wolves);
   assert.equal(game.wolfCaptain(s0), expect);
   // 全部真人狼死后由 AI 狼接任（白盒：标记真人狼死亡）
   const s = structuredClone(s0);
   for (const x of humanWolves) s.players[x - 1].alive = false;
-  const aiWolves = wolves.filter((x) => x > 3).filter((x) => s.players[x - 1].alive);
+  const aiWolves = wolves.filter((x) => !humanSeats.has(x)).filter((x) => s.players[x - 1].alive);
   if (aiWolves.length > 0) assert.equal(game.wolfCaptain(s), Math.min(...aiWolves));
   else assert.equal(game.wolfCaptain(s), null);
 });

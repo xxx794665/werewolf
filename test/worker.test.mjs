@@ -200,7 +200,11 @@ test('补位开桌：3 真人 start → 原子补 6 AI 到 9 并进 night_1；�
   assert.equal(started.data.aiFilled, 6);
   assert.equal(room.game.players.length, 9);
   assert.equal(room.game.players.filter((p) => p.isAI).length, 6);
-  assert.deepEqual(room.game.players.slice(3).map((p) => p.nick), ['AI-1', 'AI-2', 'AI-3', 'AI-4', 'AI-5', 'AI-6']);
+  // 开局座位洗牌后座位号与补位顺序解耦：按集合断言 AI 网名
+  assert.deepEqual(
+    room.game.players.filter((p) => p.isAI).map((p) => p.nick).sort(),
+    ['AI-1', 'AI-2', 'AI-3', 'AI-4', 'AI-5', 'AI-6']
+  );
   assert.equal(room.game.phase, 'night');
   assert.equal(room.game.day, 1);
   assert.equal(room.game.subPhase, 'wolf');
@@ -585,11 +589,12 @@ test('drive_ai 狼阶段（§4.1.1）：一次调用提交密聊 + 投票两段�
     };
     const CFG = { uid: 'o1', baseUrl: 'https://api.openai.com/v1', model: 'm', key: 'k' };
     const { room, rpc } = await boot();
-    /* 白盒调牌：真人（1-3）全设平民，4/5/6 号 AI 设狼、7/8/9 设神职——
-     * 狼阶段待行动序列确定为 AI 座位（4 号先行），断言与发牌随机性解耦 */
-    const ROLES = ['villager', 'villager', 'villager', 'werewolf', 'werewolf', 'werewolf', 'seer', 'witch', 'hunter'];
-    room.room.game.players.forEach((p, i) => {
-      if (p) p.role = ROLES[i];
+    /* 白盒调牌（开局座位洗牌后真人座位不定，按身份定位）：真人全设平民，
+     * AI 按座位升序前三设狼、后三设神职——狼阶段待行动序列确定为 AI 座位，
+     * 断言与发牌随机性解耦 */
+    const AI_ROLES = ['werewolf', 'werewolf', 'werewolf', 'seer', 'witch', 'hunter'];
+    room.room.game.players.forEach((p) => {
+      if (p) p.role = p.isAI ? AI_ROLES.shift() : 'villager';
     });
 
     // 桩上游返回两行回复 → 一次 drive_ai 同时入账密聊与投票
@@ -839,7 +844,7 @@ test('路由集成：建房 → 进房 → 准备 → 补位开桌 → 轮询 re
   const snap1 = await poll.json();
   assert.equal(snap1.phase, 'night');
   assert.equal(snap1.day, 1);
-  assert.equal(snap1.mySeat, 1);
+  assert.ok(!snap1.players[snap1.mySeat - 1].isAI, 'mySeat 对准本人真人座位（开局洗牌后不固定为 1）');
   assert.equal(snap1.players.length, 9);
   assert.equal('subPhase' in snap1, false, '夜里快照不露子阶段');
   assert.equal(typeof snap1.rev, 'number');

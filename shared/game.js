@@ -302,6 +302,11 @@ function hStart(state, a) {
     if (!Array.isArray(roster)) return roster; // 校验失败 = fail(state, msg)
   }
   for (const ai of generateAISeats(s.players, roster)) s.players[ai.seat - 1] = ai; // 补位到 9
+  // §3 开局座位次序随机洗牌（2026-10-05 试玩反馈：真人不再固定 1 号位）：全桌洗一次，
+  // 对局内座位号固定不变；用同一 seed 派生相位，发牌链不受影响（同 seed 角色分布不变）
+  const [seated] = shuffle(s.players, (a.seed ^ 0x9e3779b9) | 0);
+  s.players = seated;
+  s.players.forEach((p, i) => { p.seat = i + 1; }); // 洗牌后重写 seat，保持 seat === index + 1 不变式
   // §3 开局均匀随机洗牌发牌（带种子，测试可复现）
   const deck = [];
   for (const [role, n] of Object.entries(BOARD)) for (let i = 0; i < n; i++) deck.push(role);

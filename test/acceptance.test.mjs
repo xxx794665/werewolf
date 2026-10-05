@@ -203,14 +203,16 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
     s = started.state;
     assert.equal(s.players.filter(Boolean).length, 9, '原子补 AI 到 9 人');
     assert.equal(s.players.filter((p) => p && p.isAI).length, 8, '1 真人 + 8 AI');
+    /* 开局座位洗牌后座位号与补位顺序解耦：按集合断言网名、按网名回查人格成对迁移 */
+    const aiPlayers = s.players.filter((p) => p.isAI);
     assert.deepEqual(
-      s.players.filter((p) => p.isAI).map((p) => p.nick),
-      roster.map((e) => e.nick),
-      'AI 座位网名按补位顺序对位名册'
+      aiPlayers.map((p) => p.nick).sort(),
+      roster.map((e) => e.nick).sort(),
+      'AI 座位网名集合对位名册'
     );
     assert.ok(
-      s.players.filter((p) => p.isAI).every((p, i) => p.persona === roster[i].persona),
-      'AI 座位 persona 按名册对位'
+      aiPlayers.every((p) => p.persona === roster.find((e) => e.nick === p.nick).persona),
+      'AI 网名与 persona 按名册成对迁移'
     );
     assert.equal(s.phase, 'night');
     assert.equal(s.subPhase, 'wolf');
@@ -249,7 +251,7 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
       }
     };
 
-    /* 真人座位（1 号）由测试脚本代操作，口径与桩 AI 相同（狼阶段两行：密聊 + 投票） */
+    /* 真人座位（开局洗牌后动态定位）由测试脚本代操作，口径与桩 AI 相同（狼阶段两行：密聊 + 投票） */
     const humanAction = (st, seat, phase) => {
       const text = stubReply(st, seat, phase);
       if (phase === 'wolf') {
@@ -265,6 +267,7 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
     };
 
     let guard = 0;
+    const humanSeat = s.players.find((p) => !p.isAI).seat;
     while (s.phase !== 'revealed' && guard++ < 1000) {
       const seat = game.pendingSeat(s);
       assert.notEqual(seat, null, `对局中应有待行动座位（day=${s.day} ${s.subPhase}）`);
@@ -274,7 +277,7 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
 
       let chat = null;
       let action = null;
-      if (seat === 1) {
+      if (seat === humanSeat) {
         ({ chat, action } = humanAction(s, seat, phase));
       } else {
         /* 生产同款链路（ai.decideFor）：roleCardOf → windowHistory → buildMessages →
@@ -438,10 +441,10 @@ test('联机完整对局：建房→进房→准备→补位开局→走完整�
   const started = must('start', { uid: 'u1' });
   assert.equal(started.data.aiFilled, 6, '3 真人 → 补 6 个 AI');
   assert.equal(room.game.players.filter(Boolean).length, 9);
+  // 开局座位洗牌后座位号与补位顺序解耦：按集合断言 AI 网名（§7.5）
   assert.deepEqual(
-    room.game.players.filter((p) => p.isAI).map((p) => p.nick),
-    ['AI-1', 'AI-2', 'AI-3', 'AI-4', 'AI-5', 'AI-6'],
-    'AI 座位按补位顺序命名（§7.5）'
+    room.game.players.filter((p) => p.isAI).map((p) => p.nick).sort(),
+    ['AI-1', 'AI-2', 'AI-3', 'AI-4', 'AI-5', 'AI-6']
   );
   assert.equal(room.game.phase, 'night');
   assert.equal(room.game.day, 1);
