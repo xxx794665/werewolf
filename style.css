@@ -74,7 +74,10 @@ main {
 h2 { margin: 10px 0 12px; font-size: 20px; }
 h3 { margin: 0 0 8px; font-size: 16px; }
 .hint { color: var(--muted); font-size: 13px; } /* ≥12px 下限 */
-.hidden { display: none; } /* 通用显隐开关（狼队密聊卡 / 投票记录卡由 JS classList.toggle 驱动） */
+/* 折叠卡显隐（狼队密聊卡 / 投票记录卡由 JS classList.toggle 驱动）：必须用 .card.hidden
+ * 双类选择器——.card 同为单类且 display:flex，同特异性时书写顺序在后获胜；单独 .hidden
+ * 写在本文件前部会被 .card 覆盖（2026-10-05 实测：非狼玩家因此看到狼队密聊卡空壳） */
+.card.hidden { display: none; }
 
 /* ---------- 卡片与表单（flex 防压瘪：子项 min-width: 0） ---------- */
 .card {
@@ -352,7 +355,10 @@ input {
   border-radius: 8px;
   padding: 10px 16px;
   font-size: 14px;
-  transform: translate(-50%, 200%);
+  /* 隐藏态位移必须 ≥ 自身高度 + bottom 偏移，矮 toast 才能完全滑出屏幕——
+   * 旧值 200% 只移自身高的 2 倍，单行 toast（约 40px）会留 30px 残条常驻屏底
+   * （2026-10-05 试玩反馈：「未配置自有 AI 接口」提示永不消失） */
+  transform: translate(-50%, calc(100% + var(--min-tap) + 30px + env(safe-area-inset-bottom, 0px)));
   transition: transform 0.15s linear; /* 只动 transform */
   pointer-events: none;
 }

@@ -11,7 +11,8 @@
  *   - toast：只定位移动画，禁止 from-opacity 入场（透明拦截点击，§1）。
  *   - 顶栏滚动收拢：滚动 >60px 给 #topbar 加 .is-collapsed。
  *   - 玩家标签：座位行内私人笔记（预置 + 自定义，只存 localStorage，
- *     生命周期 = 所属对局），renderSeats 内联编辑器 + 快照重渲染保展开态。
+ *     生命周期 = 所属对局），renderSeats 内联编辑器；编辑器展开期间冻结座位
+ *     网格重建，保住输入草稿与软键盘焦点（否则 1.5s 重渲染销毁 input 节点）。
  *   - 投票记录卡（§5.14）：voteHistory 纯函数把公开事件流按天 / 轮次重组成
  *     票型速查，renderVoteHistory 渲染折叠卡（仿狼队密聊卡，纯前端重组）。
  * 安全：玩家昵称与 AI 发言是不可信文本，一律 textContent，绝不 innerHTML；
@@ -308,6 +309,11 @@ function logItem(snap, ev) {
 function renderSeats(snap) {
   enterTagScope(snap.solo ? "solo" : String(snap.code || ""));
   const grid = $("game-seats");
+  /* 标签编辑器展开期间冻结座位网格：快照 1.5s 一轮全量重建会把输入中（尤其移动端
+   * 软键盘组词）的自定义标签草稿连同 input 节点一起销毁——草稿永空 →「标签不能为空」
+   * 误报（2026-10-05 试玩反馈）。冻结期间 chip / 添加就地刷新；关闭、换座位、换局
+   * （enterTagScope 清 openTagSeat）时恢复全量重建。代价：冻结期座位徽章不随快照更新。 */
+  if (openTagSeat != null && openTagSeat === renderedTagSeat && grid.firstChild) return;
   grid.textContent = "";
   for (const p of snap.players) {
     if (!p) continue;
@@ -337,17 +343,23 @@ function renderSeats(snap) {
       li.classList.add("seat-tags-open");
       const editor = el("div", "tag-editor");
       const chips = el("div", "tag-chip-row");
-      const current = seatTags(p.seat);
-      for (const t of [...TAG_PRESETS, ...current.filter((c) => !TAG_PRESETS.includes(c))]) {
-        const chip = el("button", "tag-chip" + (current.includes(t) ? " is-on" : ""), t);
-        chip.type = "button";
-        chip.setAttribute("aria-pressed", String(current.includes(t)));
-        chip.addEventListener("click", () => {
-          if (!toggleSeatTag(p.seat, t)) toast(`最多 ${TAG_MAX} 个标签`);
-          renderSeats(snap);
-        });
-        chips.append(chip);
-      }
+      /* chip 行就地刷新（编辑器冻结期不整格重建——重建会销毁 input 草稿与焦点） */
+      const refreshChips = () => {
+        chips.textContent = "";
+        const current = seatTags(p.seat);
+        for (const t of [...TAG_PRESETS, ...current.filter((c) => !TAG_PRESETS.includes(c))]) {
+          const chip = el("button", "tag-chip" + (current.includes(t) ? " is-on" : ""), t);
+          chip.type = "button";
+          chip.setAttribute("aria-pressed", String(current.includes(t)));
+          chip.addEventListener("click", () => {
+            if (!toggleSeatTag(p.seat, t)) return toast(`最多 ${TAG_MAX} 个标签`);
+            refreshChips();
+            refreshTagBadges(badges, p.seat);
+          });
+          chips.append(chip);
+        }
+      };
+      refreshChips();
       const row = el("div", "tag-add-row");
       const input = el("input", "tag-add-input");
       input.maxLength = TAG_LEN_MAX;
@@ -357,7 +369,10 @@ function renderSeats(snap) {
       const doAdd = () => {
         const err = addSeatTag(p.seat, input.value);
         if (err) return toast(err);
-        renderSeats(snap);
+        input.value = "";
+        refreshChips(); // 新自定义标签进 chip 行
+        refreshTagBadges(badges, p.seat);
+        input.focus();
       };
       add.addEventListener("click", doAdd);
       input.addEventListener("keydown", (e) => {
@@ -369,6 +384,7 @@ function renderSeats(snap) {
     }
     grid.append(li);
   }
+  renderedTagSeat = openTagSeat;
 }
 
 /* ---------- 玩家标签（私人笔记：座位行内快速标注，只存本机 localStorage） ----------
@@ -383,7 +399,8 @@ const TAG_LEN_MAX = 8; // 单标签字数上限
 
 let tagScope = null;
 let tagSeats = {}; // { [seat]: string[] }
-let openTagSeat = null; // 当前展开编辑器的座位（快照 1.5s 一轮全量重渲染，靠模块状态保住展开态）
+let openTagSeat = null; // 当前展开编辑器的座位（模块状态保展开态）
+let renderedTagSeat = null; // 当前 DOM 里编辑器所属座位；与 openTagSeat 一致时座位网格跳过重建（保输入草稿与焦点）
 
 function tagsKey(scope) {
   return TAGS_KEY_PREFIX + scope;
@@ -404,6 +421,7 @@ export function enterTagScope(scope) {
   if (scope === tagScope) return;
   tagScope = scope;
   openTagSeat = null;
+  renderedTagSeat = null;
   tagSeats = scope ? readTagsStorage(scope) || {} : {};
 }
 
@@ -411,6 +429,7 @@ export function enterTagScope(scope) {
 export function resetTags(scope) {
   tagScope = scope;
   openTagSeat = null;
+  renderedTagSeat = null;
   tagSeats = {};
   try {
     if (typeof localStorage !== "undefined") localStorage.removeItem(tagsKey(scope));
@@ -419,6 +438,13 @@ export function resetTags(scope) {
 
 export function seatTags(seat) {
   return (tagSeats[seat] || []).slice();
+}
+
+/** 座位徽章行的标签段就地刷新（编辑器冻结期用）：只动 .badge-tag，身份 / AI / 出局等徽章不变。 */
+function refreshTagBadges(badges, seat) {
+  for (const x of badges.querySelectorAll(".badge-tag")) x.remove();
+  const anchor = badges.firstChild;
+  for (const t of seatTags(seat)) badges.insertBefore(badge("badge-tag", null, t), anchor);
 }
 
 function persistTags() {
