@@ -23,6 +23,7 @@
 ⚠️ 本机实测（node v22.20.0，cmd）：**不要**写 `node --test test/`（把目录当模块加载，报 MODULE_NOT_FOUND）。
 ⚠️ cmd 下 `2>nul` 重定向可能残留名为 `nul` 的文件（Windows 保留设备名）：提交前 `git status` 确认无 `nul`，有则 `rm -f nul`。
 静态骨架自检：`node tools/check_site.cjs`（校验 index.html 引用、sw.js CACHE 格式、wrangler.toml 必填字段）。
+提交信息格式（2026-10-05 起硬规则，用户口径）：首行 `类型: 中文摘要`——类型 `feat`（新功能）/ `fix`（bug 修复）/ `improve`（重构与体验优化）/ `docs`（纯文档）/ `chore`（杂务）；正文保持详尽中文说明不变。
 
 ## 4. 硬约束（永不简化、不让步）
 
