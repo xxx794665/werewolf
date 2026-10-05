@@ -15,6 +15,9 @@
  *     网格重建，保住输入草稿与软键盘焦点（否则 1.5s 重渲染销毁 input 节点）。
  *   - 投票记录卡（§5.14）：voteHistory 纯函数把公开事件流按天 / 轮次重组成
  *     票型速查，renderVoteHistory 渲染折叠卡（仿狼队密聊卡，纯前端重组）。
+ *   - 日志按天折叠（2026-10-05 试玩反馈）：groupLogEvents 纯函数按天分组
+ *     （成对 exile{null} 跳过），renderLog 渲染为每天一个 <details>——最新一天
+ *     默认展开、更早收起，手动开合按天记忆、跨 1.5s 快照重建不丢。
  * 安全：玩家昵称与 AI 发言是不可信文本，一律 textContent，绝不 innerHTML；
  *   innerHTML 只用于本仓库 icons.js 的 SVG 常量。
  * node --test 可 import（顶层不碰 document）。
@@ -263,17 +266,51 @@ function renderIdCard(snap) {
   for (const t of lines) card.append(el("p", "idcard-line", t));
 }
 
+/* ---------- 日志按天折叠（2026-10-05 试玩反馈）----------
+ * 手动开合状态按天记忆：渲染默认「最新一天展开、更早收起」，手动开合永远优先，
+ * 跨 1.5s 快照重建不丢；天数较上次回退 = 新对局，记忆清零。
+ * 开合记在 summary 的 click（程序化改 .open 不触发 click，重渲染不污染手动状态；
+ * 键盘 Enter/Space 在 summary 上同样派发 click）。 */
+
+let logDayOpen = new Map(); // day -> open（仅手动开合过才写入）
+let logMaxDay = 0;
+
+/** 公开事件流 → [{ day, events: [...] }]（纯函数，node --test 可验）：
+ * 组按 day 升序、组内保持事件流原序；主投票平票进 PK 时成对落下的
+ * exile{null}（§1.3 schema 不动）在此跳过——并非平安日，票型已由 tie 行表达。 */
+export function groupLogEvents(events) {
+  const groups = [];
+  for (let i = 0; i < (events || []).length; i++) {
+    const ev = events[i];
+    const prev = events[i - 1];
+    if (ev.t === "exile" && ev.seat == null && prev && prev.t === "tie" && prev.day === ev.day) continue;
+    let g = groups[groups.length - 1];
+    if (!g || g.day !== ev.day) {
+      g = { day: ev.day, events: [] };
+      groups.push(g);
+    }
+    g.events.push(ev);
+  }
+  return groups;
+}
+
 function renderLog(snap) {
   const box = $("log");
   box.textContent = "";
-  const events = (snap.events || []).slice(-200); // 防长局 DOM 膨胀
-  for (let i = 0; i < events.length; i++) {
-    const ev = events[i];
-    const prev = events[i - 1];
-    /* 主投票平票进 PK 时 vote_result 成对落成 tie + exile{null}（§1.3 schema 不动）：
-       后者并非平安日（PK 尚未进行），票型已由 tie 行完整表达，事件流里跳过不误导 */
-    if (ev.t === "exile" && ev.seat == null && prev && prev.t === "tie" && prev.day === ev.day) continue;
-    box.append(logItem(snap, ev));
+  const groups = groupLogEvents((snap.events || []).slice(-200)); // 防长局 DOM 膨胀
+  const latestDay = groups.length ? groups[groups.length - 1].day : 0;
+  if (latestDay < logMaxDay) logDayOpen.clear(); // 天数回退 = 新对局
+  logMaxDay = Math.max(logMaxDay, latestDay);
+  for (const g of groups) {
+    const det = el("details", "log-day");
+    det.open = logDayOpen.has(g.day) ? logDayOpen.get(g.day) : g.day === latestDay;
+    const head = el("summary", "log-day-head", `第 ${g.day} 天 · ${g.events.length} 条`);
+    head.addEventListener("click", () => logDayOpen.set(g.day, !det.open));
+    det.append(head);
+    const list = el("ul", "log-day-list");
+    for (const ev of g.events) list.append(logItem(snap, ev));
+    det.append(list);
+    box.append(det);
   }
 }
 

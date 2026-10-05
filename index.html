@@ -98,11 +98,16 @@
 
     <!-- ============ 屏：对局主屏（features.md §4：夜晚 / 白天子阶段在此渲染） ============ -->
     <section class="screen" id="screen-game" hidden>
-      <!-- 阶段条：夜里只显示「第 N 夜」，不显示子阶段与轮到谁（防泄漏，features.md §4.1.6） -->
-      <div class="phase-banner" id="phase-banner">第 1 夜</div>
+      <!-- 吸顶组（2026-10-05 试玩反馈）：阶段条 + 身份卡作为一个整体吸在顶栏正下方
+           （--topbar-h 实测写入，js/ui.js initTopbar），日志再长抬头仍见阶段与本人私有信息 -->
+      <div class="sticky-head">
+        <!-- 阶段条：夜里只显示「第 N 夜」，不显示子阶段与轮到谁（防泄漏，features.md §4.1.6） -->
+        <div class="phase-banner" id="phase-banner">第 1 夜</div>
 
-      <!-- 身份卡：我的角色 + 合法私有信息（狼队友 / 验史 / 药态 / 刀口），js/ui.js renderIdCard -->
-      <div class="idcard" id="idcard"></div>
+        <!-- 身份卡：我的角色 + 合法私有信息（狼队友 / 验史 / 药态 / 刀口），js/ui.js renderIdCard；
+             限高 30vh 内部滚动（style.css），验史多行时不吃满竖屏 -->
+        <div class="idcard" id="idcard"></div>
+      </div>
 
       <!-- 投票记录卡（§5.14）：按天 / 轮次（主投票 / PK 投票）分组的逐人票型 + 得票 + 结果速查；
            纯前端从公开事件流重组（js/ui.js renderVoteHistory），默认收起，open 状态由浏览器保持 -->
@@ -111,8 +116,9 @@
         <div id="vote-history-list"></div>
       </details>
 
-      <!-- 公开事件流：发言 / 遗言 / PK / 投票去向 / 死讯 / 翻牌与枪杀公告（渲染归 js/ui.js） -->
-      <ul class="log" id="log" aria-live="polite"></ul>
+      <!-- 公开事件流（渲染归 js/ui.js）：按「第 N 天」分组的折叠收纳（2026-10-05 试玩反馈），
+           最新一天默认展开、更早收起；条目 = 发言 / 遗言 / PK / 投票去向 / 死讯 / 翻牌与枪杀公告 -->
+      <div class="log" id="log" aria-live="polite"></div>
 
       <!-- 狼队密聊历史（§4.1.1 修订：仅存活狼座可见，跨夜保留、白天可回看；狼夜行动面板实时展示时本卡不重复） -->
       <details class="card hidden" id="wolf-history" open>

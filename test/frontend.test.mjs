@@ -12,6 +12,8 @@
  *   6. 狼队密聊历史进提示词：夜里分组渲染 / 白天注入 / 非狼白名单忽略（§4.1.1 修订）
  *   7. ui.js 投票记录卡：voteHistory 公开事件流重组（§5.14：主/PK 分轮、
  *      tie 认领结果不被成对 exile{null} 覆盖、得票重算排序、平安日 / 进行中）
+ *   8. ui.js 日志按天折叠：groupLogEvents 分组纯函数（按天升序、组内保序、
+ *      成对 exile{null} 跳过、平安日不误删）（2026-10-05 试玩反馈）
  * 运行：node --test test/frontend.test.mjs
  * ============================================================ */
 
@@ -334,4 +336,34 @@ test("voteHistory：主/PK 分轮、tie 认领结果、得票重算排序、平�
   assert.equal(rounds[3].outcome, null); // 无 tie/exile 收尾 = 进行中
   assert.deepEqual(ui.voteHistory([]), []);
   assert.deepEqual(ui.voteHistory(null), []);
+});
+
+/* ---------- 8. 日志按天折叠：groupLogEvents 分组纯函数（2026-10-05 试玩反馈） ---------- */
+
+test("groupLogEvents：按天升序分组、组内保序、成对 exile{null} 跳过、平安日不误删", async () => {
+  const ui = await import("../js/ui.js");
+  const groups = ui.groupLogEvents([
+    { t: "deaths", day: 1, seats: [3] },
+    { t: "speech", day: 1, seat: 1, text: "a" },
+    { t: "vote", day: 1, voter: 1, target: 3 },
+    { t: "tie", day: 1, seats: [3, 5] },
+    { t: "exile", day: 1, seat: null }, // 主投票平票进 PK 时成对发出 → 跳过
+    { t: "pk_speak", day: 1, seat: 5, text: "pk" }, // 同日 PK 发言仍归同组
+    { t: "exile", day: 1, seat: 5 },
+    { t: "deaths", day: 2, seats: [] },
+    { t: "speech", day: 2, seat: 2, text: "b" },
+  ]);
+  assert.deepEqual(groups.map((g) => [g.day, g.events.length]), [[1, 6], [2, 2]]);
+  assert.ok(!groups[0].events.some((e) => e.t === "exile" && e.seat == null), "成对 exile{null} 不进组");
+  assert.equal(groups[0].events[0].t, "deaths"); // 组内保持事件流原序
+  assert.equal(groups[0].events[5].t, "exile");
+  /* 无成对 tie 的 exile{null} = 真平安日，不得误删 */
+  const peaceful = ui.groupLogEvents([
+    { t: "vote", day: 1, voter: 1, target: null },
+    { t: "exile", day: 1, seat: null },
+  ]);
+  assert.equal(peaceful.length, 1);
+  assert.equal(peaceful[0].events.length, 2);
+  assert.deepEqual(ui.groupLogEvents([]), []);
+  assert.deepEqual(ui.groupLogEvents(null), []);
 });

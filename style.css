@@ -137,12 +137,11 @@ input {
   font-weight: 600;
 }
 .log {
-  list-style: none;
   margin: 0 0 12px;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px; /* 天折叠组间距 */
   min-width: 0;
 }
 .log li {
@@ -152,6 +151,25 @@ input {
   padding: 8px 12px;
   font-size: 14px;
   overflow-wrap: anywhere; /* 长文本不撑破单列 */
+}
+
+/* ---------- 日志按天折叠（2026-10-05 试玩反馈）：每天一个 <details>，
+ * 最新一天默认展开、更早收起（开合状态归 js/ui.js renderLog） ---------- */
+.log-day { min-width: 0; }
+.log-day summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 4px 2px; /* 点击热区宽裕些，字体不变小 */
+}
+.log-day-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
 }
 
 /* ---------- 座位网格：小屏 2 列，≥480px 3 列 ---------- */
@@ -276,32 +294,39 @@ input {
 .tag-add-row { display: flex; gap: 8px; }
 .tag-add-row input { flex: 1; }
 
-/* ---------- 阶段条（icon + 文案 + 子阶段 + 轮到谁 + 倒计时） ----------
- * 吸顶在顶栏正下方随页面滚动（--topbar-h 由 js/ui.js initTopbar 实测写入），
- * 像常驻 toast：对局进行中任何时候抬头可见阶段 / 行动方 / 剩余时间 */
+/* ---------- 吸顶组：阶段条 + 身份卡整体吸顶（2026-10-05 试玩反馈） ----------
+ * 吸在顶栏正下方随页面滚动（--topbar-h 由 js/ui.js initTopbar 实测写入），
+ * 日志深处抬头仍见阶段 / 行动方 / 本人身份与私有信息（验史 / 队友 / 药态）。
+ * 背景填页面底色：滚动内容不从两卡间隙透出；阴影给吸顶态层次 */
+.sticky-head {
+  position: sticky;
+  top: var(--topbar-h, 44px);
+  z-index: 9;
+  margin: 0 0 12px;
+  background: var(--bg);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+}
+.sticky-head .phase-banner { margin: 0; }
 .phase-banner {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  position: sticky;
-  top: var(--topbar-h, 44px);
-  z-index: 9;
-  margin: 0 0 12px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
-  backdrop-filter: blur(6px);
 }
 .phase-countdown { font-variant-numeric: tabular-nums; color: var(--accent); }
 .phase-sub { margin-left: auto; font-size: 13px; color: var(--muted); font-weight: 400; flex-shrink: 0; }
 
-/* ---------- 身份卡（我的角色 + 合法私有信息） ---------- */
+/* ---------- 身份卡（我的角色 + 合法私有信息；吸顶组内限高内滚） ---------- */
 .idcard {
   background: var(--panel);
   border: 1px solid var(--accent);
   border-radius: 10px;
   padding: 10px 14px;
-  margin: 0 0 12px;
+  margin: 8px 0 0;
   min-width: 0;
+  /* 验史 / 队友多行时吸顶组不吃满竖屏，超出部分卡内滚动 */
+  max-height: 30vh;
+  overflow-y: auto;
 }
 .idcard:empty { display: none; }
 .idcard-head { display: flex; align-items: center; gap: 8px; font-size: 16px; min-width: 0; }
