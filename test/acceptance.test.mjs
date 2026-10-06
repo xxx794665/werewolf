@@ -37,9 +37,12 @@ function seeded(seed) {
   };
 }
 
-const ROLE_NAME = { wolf: '狼人', villager: '平民', seer: '预言家', witch: '女巫', hunter: '猎人' };
+const ROLE_NAME = {
+  wolf: '狼人', wolfking: '狼王', villager: '平民', guard: '守卫',
+  seer: '预言家', witch: '女巫', hunter: '猎人', idiot: '白痴',
+}; // §1.2–1.4（ADR-0013）三新角色 + §1.2 狼王同狼阵营
 
-/* ---------- 公开历史 schema（ai-prompts.md §1.3）：只允许这些事件与字段 ---------- */
+/* ---------- 公开历史 schema（ai-prompts.md §1.3 + 附录 t-schema 最终版）：只允许这些事件与字段 ---------- */
 
 const HISTORY_KEYS = {
   deaths: ['day', 'seats', 't'],
@@ -48,16 +51,42 @@ const HISTORY_KEYS = {
   pk_speak: ['day', 'seat', 't', 'text'],
   tie: ['day', 'seats', 't'],
   vote: ['day', 't', 'target', 'voter'],
-  exile: ['day', 'seat', 't'],
-  hunter: ['day', 'seat', 't', 'target'],
+  exile: ['day', 'seat', 't'], // §1.5（ADR-0013）：可选 idiot=true（白痴翻牌免死）——下方动态扩
+  hunter: ['day', 'seat', 't', 'target'], // §1.5（ADR-0013）：可选 role='wolfking'（狼王翻牌）——下方动态扩
   digest: ['day', 'dead', 't', 'text'],
+  /* §2.5 / 附录 t-schema 最终版（ADR-0014）：警长竞选事件 */
+  elect_run: ['day', 'run', 'seat', 't'],
+  elect_speech: ['day', 'seat', 't', 'text'],
+  elect_withdraw: ['day', 'quit', 'seat', 't'],
+  elect_vote: ['day', 't', 'target', 'voter'],
+  sheriff: ['day', 'kind', 't'], // kind 相关可选字段见 SHERIFF_KEYS
+};
+/* t:'sheriff' 按 kind 收字段（附录：elected 带 Seat、tie-pk 带 pk、transfer/destroy 带 from/to） */
+const SHERIFF_KEYS = {
+  elected: ['day', 'kind', 'seat', 't'],
+  none: ['day', 'kind', 't'],
+  'no-voters': ['day', 'kind', 't'],
+  'tie-pk': ['day', 'kind', 'pk', 't'],
+  transfer: ['day', 'from', 'kind', 't', 'to'],
+  destroy: ['day', 'from', 'kind', 't'],
 };
 
 function assertPublicHistory(ev, where) {
   assert.ok(HISTORY_KEYS[ev.t], `${where}: 未知事件类型 ${ev.t}`);
+  /* 可选字段的动态键集：白名单仍精确到字段级（最小化防泄密探针），不放宽为 every-in */
+  let keys = HISTORY_KEYS[ev.t];
+  if (ev.t === 'sheriff') {
+    assert.ok(SHERIFF_KEYS[ev.kind], `${where}: 未知警长事件 kind ${ev.kind}`);
+    keys = SHERIFF_KEYS[ev.kind];
+  }
+  if (ev.t === 'exile' && ev.idiot === true) keys = [...keys, 'idiot'].sort();
+  if (ev.t === 'hunter' && ev.role) {
+    assert.ok(ev.role === 'hunter' || ev.role === 'wolfking', `${where}: hunter.role 只允许 hunter / wolfking`);
+    keys = [...keys, 'role'].sort();
+  }
   assert.deepEqual(
     Object.keys(ev).sort(),
-    HISTORY_KEYS[ev.t],
+    keys,
     `${where}: ${ev.t} 事件携带 schema 外字段（可能夹带隐藏信息）`
   );
 }
@@ -101,16 +130,28 @@ function assertNoLeak(req) {
   }
 
   // roleCard 角色白名单 + 私有信息与真实内核状态一致（合法私有信息必须是真的）
-  // roster（全员昵称对照）与 persona（AI 言行风格）是公开层字段（ADR-0009），与身份无关
+  // roster / persona（ADR-0009）与 board / sheriff / election（§1.6 / 裁定 9，
+  // ADR-0013/0014）是公开层字段，与身份无关；guardLast 是守卫私有字段（裁定 10）
   const keys = Object.keys(card).sort();
-  if (card.role === 'wolf') {
-    // §4.1.1：狼身份卡全阶段携带密聊全程日志（跨夜保留）；狼阶段另带狼票 / 队长
-    assert.ok(
-      keys.every((k) => ['role', 'seat', 'wolves', 'wolfChatLog', 'wolfVotes', 'captain', 'roster', 'persona'].includes(k)),
-      `${label}: 狼身份卡字段越界：${keys.join(',')}`
-    );
-    const actual = state.players.filter((p) => p && p.role === 'werewolf').map((p) => p.seat);
-    assert.deepEqual(card.wolves, actual, `${label}: 狼队友名单必须等于真实狼座位`);
+  /* 公开层新字段值核验（全角色统一）：board / sheriff / election 必须等于真实内核值 */
+  assert.equal(card.board, state.board || 'standard', `${label}: 板子 id 必须等于真实值（公开层）`);
+  assert.equal(card.sheriff, (state.sheriff && state.sheriff.seat) ?? null, `${label}: 警长座位必须等于真实值（公开层）`);
+  if ('election' in card) {
+    const el = state.sheriff && state.sheriff.election;
+    assert.ok(el, `${label}: election 字段只允许出现在竞选中`);
+    assert.deepEqual(card.election.candidates, el.candidates, `${label}: 候选台必须等于真实值（公开层）`);
+    assert.deepEqual(card.election.pk, el.pkCandidates || [], `${label}: PK 台必须等于真实值（公开层）`);
+  }
+  const expect = ['board', 'role', 'roster', 'seat', 'sheriff'];
+  if ('persona' in card) expect.push('persona');
+  if ('election' in card) expect.push('election'); // 竞选期间公开举手信息
+  if (card.role === 'wolf' || card.role === 'wolfking') {
+    // §1.2（ADR-0013）狼王同狼口径；§4.1.1 密聊全程日志（跨夜保留）；狼阶段另带狼票 / 队长
+    expect.push('wolves', 'wolfChatLog');
+    if ('wolfVotes' in card) expect.push('wolfVotes', 'captain');
+    assert.deepEqual(keys, expect.sort(), `${label}: 狼身份卡字段越界：${keys.join(',')}`);
+    const actual = state.players.filter((p) => p && game.isWolf(p.role)).map((p) => p.seat);
+    assert.deepEqual(card.wolves, actual, `${label}: 狼队友名单必须等于真实狼座位（isWolf 口径，含狼王）`);
     assert.deepEqual(card.wolfChatLog, state.wolfChatLog || [], `${label}: 密聊日志必须等于真实频道内容（全阶段携带）`);
     if ('wolfVotes' in card) {
       assert.equal(phase, 'wolf', `${label}: 狼票 / 队长只允许出现在狼阶段身份卡`);
@@ -124,32 +165,37 @@ function assertNoLeak(req) {
       assert.notEqual(phase, 'wolf', `${label}: 狼阶段身份卡必须携带狼票`);
     }
   } else if (card.role === 'seer') {
-    assert.deepEqual(keys, ['checks', 'persona', 'role', 'roster', 'seat'], `${label}: 预言家身份卡字段越界`);
+    expect.push('checks');
+    assert.deepEqual(keys, expect.sort(), `${label}: 预言家身份卡字段越界`);
     for (const c of card.checks) {
       const actualRole = state.players[c.seat - 1].role;
-      assert.equal(c.result, actualRole === 'werewolf' ? 'wolf' : 'good', `${label}: 验人结果必须与真实身份一致`);
+      assert.equal(c.result, game.isWolf(actualRole) ? 'wolf' : 'good', `${label}: 验人结果必须与真实身份一致（验狼王=狼）`);
     }
   } else if (card.role === 'witch') {
-    assert.ok(
-      keys.every((k) => ['seat', 'role', 'antidote', 'poison', 'knifeTarget', 'roster', 'persona'].includes(k)),
-      `${label}: 女巫身份卡字段越界`
-    );
+    expect.push('antidote', 'poison');
+    if ('knifeTarget' in card) expect.push('knifeTarget');
+    assert.deepEqual(keys, expect.sort(), `${label}: 女巫身份卡字段越界`);
     if ('knifeTarget' in card) {
       assert.equal(phase, 'witch', `${label}: 刀口只允许出现在女巫行动夜`);
       assert.equal(card.antidote, true, `${label}: 解药已用不得再看刀口（§4.1.3）`);
       assert.equal(card.knifeTarget, state.night && state.night.blade, `${label}: 刀口必须是当夜真实刀口`);
     }
+  } else if (card.role === 'guard') {
+    expect.push('guardLast'); // 裁定 10（ADR-0013）：昨晚守护座位，仅守卫座携带
+    assert.deepEqual(keys, expect.sort(), `${label}: 守卫身份卡字段越界`);
+    assert.equal(card.guardLast, (state.guard && state.guard.last) ?? null, `${label}: 守卫昨晚守护座位必须等于真实值`);
   } else {
-    assert.deepEqual(keys, ['persona', 'role', 'roster', 'seat'], `${label}: 平民 / 猎人身份卡只允许座位与角色 + 公开层`);
+    assert.deepEqual(keys, expect.sort(), `${label}: 平民 / 猎人 / 白痴身份卡只允许座位与角色 + 公开层`);
   }
 
   // 跨角色私密信息探针：他人可见内容里绝不出现别的角色的私有渲染
-  if (card.role !== 'wolf') {
+  if (card.role !== 'wolf' && card.role !== 'wolfking') {
     assert.ok(!combined.includes('全体狼座位') && !combined.includes('存活队友'), `${label}: 非狼不得见狼队名单`);
     assert.ok(!combined.includes('狼队密聊记录'), `${label}: 非狼不得见狼队密聊（§4.1.1）`);
   }
   if (card.role !== 'seer') assert.ok(!combined.includes('查验记录'), `${label}: 非预言家不得见验史`);
   if (card.role !== 'witch') assert.ok(!combined.includes('你的解药'), `${label}: 非女巫不得见用药状态`);
+  if (card.role !== 'guard') assert.ok(!combined.includes('你昨晚守护了'), `${label}: 非守卫不得见守护记录（裁定 10）`);
   if (!(phase === 'witch' && card.role === 'witch')) {
     assert.ok(!combined.includes('当夜刀口是'), `${label}: 当夜刀口只给行动夜且解药未用的女巫`);
   }
@@ -222,7 +268,10 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
     const phasesSeen = new Set();
     const alive = (st) => st.players.filter((p) => p && p.alive).map((p) => p.seat);
 
-    /* 桩 AI 的回复（站在驱动者位置选合法目标；请求内容本身不含这些） */
+    /* 桩 AI 的回复（站在驱动者位置选合法目标；请求内容本身不含这些）。
+     * §2.3（ADR-0014）竞选策略：前 2 个存活座位上警 → 双候选走完整竞选链
+     * （发言 → 退水 → 投票），投票人集中投首位候选 → 必出唯一顶票当选；
+     * badge 回退 = 撕毁警徽（§2.4 回退口径）。 */
     const stubReply = (st, seat, phase) => {
       const others = alive(st).filter((x) => x !== seat);
       switch (phase) {
@@ -234,6 +283,8 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
           return '我确实是好人，台上另一位更值得出，大家想清楚再投。';
         case 'wolf':
           return `今晚刀 ${alive(st)[0]} 号，白天我来带节奏，你们口型跟我对齐。\n${alive(st)[0]}`;
+        case 'guard':
+          return String(others[0]); // §1.3 守卫必选人（标准板不出场，多板整局时兜底）
         case 'seer':
           return String(others[0]);
         case 'witch':
@@ -246,6 +297,21 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
           const t = (st.pkCandidates || []).find((x) => x !== seat);
           return t == null ? 'skip' : String(t);
         }
+        case 'elect_join':
+          return alive(st).slice(0, 2).includes(seat) ? 'run' : 'pass'; // 双候选走完整竞选链
+        case 'elect_withdraw':
+          return 'stay'; // 留台
+        case 'elect_campaign':
+          return `我是${seat}号，昨晚的死讯值得好好盘，警长位我先表个态，选我给大家带队。`;
+        case 'elect_pk_speak':
+          return `我是${seat}号，平票台上的另一位比我更可疑，警长票请大家投给我。`;
+        case 'elect_vote': {
+          const el = st.sheriff && st.sheriff.election;
+          const pool = st.subPhase === 'elect_pk_vote' ? el.pkCandidates : el.candidates;
+          return pool && pool.length ? String(pool[0]) : 'skip';
+        }
+        case 'badge':
+          return 'skip'; // 撕毁警徽（§2.4 回退口径同款）
         default:
           throw new Error(`桩 AI 未知阶段 ${phase}`);
       }
@@ -332,6 +398,9 @@ test('单机完整对局：桩 AI 走完夜晚/白天/投票至 revealed；每�
     assert.ok(typeof s.reason === 'string' && s.reason.length > 0, '必须有胜负原因');
     assert.ok(log.length > 0, '公开事件账本非空');
     assert.ok(phasesSeen.has('wolf') && phasesSeen.has('speak') && phasesSeen.has('vote'), '必须走完夜晚 / 白天发言 / 投票');
+    /* §2.1（ADR-0014）警长恒开启：day 1 必走竞选链并出 sheriff 结论 */
+    assert.ok(phasesSeen.has('elect_join') && phasesSeen.has('elect_campaign') && phasesSeen.has('elect_vote'), '必须走完警长竞选链');
+    assert.ok(log.some((e) => e.t === 'sheriff'), '公开账本必须含警长结论事件');
     assert.ok(requests.length > 0, '至少发生一次 AI 请求');
 
     /* 铁律：逐次核对捕获到的每一个真实 AI 请求 */
@@ -437,7 +506,8 @@ test('联机完整对局：建房→进房→准备→补位开局→走完整�
 
   must('ready', { uid: 'u3', ready: true });
 
-  /* 房主 start：人数不足 → 自动补 AI 至 9 人（唯一板子固定 9，§3 / §7.4），原子进 night_1 */
+  /* 房主 start：人数不足 → 自动补 AI 至 9 人（固定 9 人 §3 / §7.4；不传 board
+     → 缺省 standard，§1.1 旧客户端兼容），原子进 night_1 */
   const started = must('start', { uid: 'u1' });
   assert.equal(started.data.aiFilled, 6, '3 真人 → 补 6 个 AI');
   assert.equal(room.game.players.filter(Boolean).length, 9);
@@ -469,6 +539,13 @@ test('联机完整对局：建房→进房→准备→补位开局→走完整�
       case 'wolf':
         [action, extra] = ['wolf-target', { target: aliveSeats[0] }];
         break;
+      case 'guard':
+        /* §1.3（ADR-0013）守卫：随机选一个 ≠ 上一晚守护的目标（标准板不出场，兜底） */
+        [action, extra] = [
+          'guard-protect',
+          { target: aliveSeats.find((x) => x !== (g.guard && g.guard.last)) ?? aliveSeats[0] },
+        ];
+        break;
       case 'seer':
         [action, extra] = ['seer-check', { target: others[0] }];
         break;
@@ -495,6 +572,28 @@ test('联机完整对局：建房→进房→准备→补位开局→走完整�
         [action, extra] = ['vote', { target: t == null ? null : t }];
         break;
       }
+      /* ---------- §2.3 / §2.6（ADR-0014）警长竞选与警徽流路由 ----------
+       * 竞选策略同单机：前 2 个存活座位上警 → 双候选 → 全留台 → 集中投首位 → 当选；
+       * badge 撕毁（§2.4 回退口径同款）。非法 / 失败动作由 must 的断言直接暴露。 */
+      case 'elect_join':
+        [action, extra] = ['elect-run', { run: aliveSeats.slice(0, 2).includes(seat) }];
+        break;
+      case 'elect_withdraw':
+        [action, extra] = ['elect-withdraw', { quit: false }];
+        break;
+      case 'elect_campaign':
+      case 'elect_pk_speak':
+        [action, extra] = ['elect-speak', { text: `我是${seat}号，警长位我当仁不让，选我给大家带队。` }];
+        break;
+      case 'elect_vote': {
+        const el = g.sheriff && g.sheriff.election;
+        const pool = g.subPhase === 'elect_pk_vote' ? el.pkCandidates : el.candidates;
+        [action, extra] = ['elect-vote', { target: pool && pool.length ? pool[0] : null }];
+        break;
+      }
+      case 'badge':
+        [action, extra] = ['badge-move', { target: null }]; // 撕毁警徽
+        break;
       default:
         throw new Error(`未覆盖阶段 ${phase}`);
     }
@@ -508,6 +607,12 @@ test('联机完整对局：建房→进房→准备→补位开局→走完整�
   assert.equal(room.game.phase, 'revealed', '联机整局必须收敛');
   assert.ok(room.game.winner === 'good' || room.game.winner === 'wolf', `必须有胜负，实际 ${room.game.winner}`);
   assert.ok(phasesSeen.has('wolf') && phasesSeen.has('speak') && phasesSeen.has('vote'), '必须走完夜晚 / 发言 / 投票');
+  /* §2.1（ADR-0014）警长恒开启：联机整局同样必走竞选链并出 sheriff 结论 */
+  assert.ok(
+    phasesSeen.has('elect_join') && phasesSeen.has('elect_campaign') && phasesSeen.has('elect_vote'),
+    '必须走完警长竞选链'
+  );
+  assert.ok(room.log.some((e) => e.t === 'sheriff'), '房间公开账本必须含警长结论事件');
   assert.ok(room.log.length > 0, '房间公开事件账本非空');
   room.log.forEach((ev, i) => assertPublicHistory(ev, `room.log[${i}]`));
 
@@ -519,6 +624,91 @@ test('联机完整对局：建房→进房→准备→补位开局→走完整�
       snap.players.every((p) => p && p.role),
       `revealed 后座位 ${seat} 视角应见全员身份`
     );
+  }
+});
+
+/* ============================================================
+ * 2.5 快照字段白名单探针（裁定 4 / §2.5 / §4.2）——现状无此探针，按新字段新增：
+ *    board / sheriff / election / serverDrive 的合法键集 + 夜冻结口径不破
+ * ============================================================ */
+
+test('快照字段探针：board/sheriff/election/serverDrive 合法键集；夜里冻结口径仍成立', () => {
+  let room = logic.createRoom('SNAP01', { nick: '甲', uid: 'u1' }, T0).room;
+  let now = T0;
+  const drive = (action, body) => {
+    now += 500;
+    const out = logic.applyAction(room, action, body, { now, seed: 9 });
+    assert.ok(!out.error, `${action} 不应失败：${out.error}`);
+    room = out.room;
+  };
+  const actFor = (seat, action, extra) => {
+    const p = room.game.players[seat - 1];
+    drive(action, p.isAI ? { uid: room.ownerUid, seat, ...extra } : { uid: p.uid, ...extra });
+  };
+  drive('join', { nick: '乙', uid: 'u2' });
+  drive('join', { nick: '丙', uid: 'u3' });
+  for (const u of ['u1', 'u2', 'u3']) drive('ready', { uid: u, ready: true });
+  drive('start', { uid: 'u1' });
+
+  /* 夜 1：board 已落账公开（§1.6）、sheriff.seat=null 恒公开（§2.5）；
+     夜里不露 subPhase / election（§4.1.6 冻结口径不因新字段破） */
+  assert.equal(room.game.phase, 'night');
+  const nightSnap = logic.snapshotFor(room, 1);
+  assert.equal(nightSnap.board, 'standard', 'board 从 night_1 起公开（缺省 standard）');
+  assert.deepEqual(nightSnap.sheriff, { seat: null }, '警长未选时 sheriff.seat=null 公开');
+  assert.equal('subPhase' in nightSnap, false, '夜里不露子阶段');
+  assert.equal('election' in nightSnap, false, '夜里不露竞选态');
+  for (let seat = 1; seat <= 9; seat++) {
+    const s = logic.snapshotFor(room, seat);
+    assert.equal('subPhase' in s, false, `夜里座位 ${seat} 快照不露子阶段`);
+    assert.equal('election' in s, false, `夜里座位 ${seat} 快照不露竞选态`);
+  }
+
+  /* 推进到 day 1 上警表态（§2.2 时序：首夜遗言 → 竞选） */
+  const wolves = room.game.players.filter((p) => p && p.alive && game.isWolf(p.role)).map((p) => p.seat);
+  const victim = room.game.players.find((p) => p && p.alive && !game.isWolf(p.role)).seat;
+  for (const w of wolves) actFor(w, 'wolf-target', { target: victim });
+  const seer = room.game.players.find((p) => p && p.alive && p.role === 'seer').seat;
+  actFor(seer, 'seer-check', {
+    target: room.game.players.find((p) => p && p.alive && p.seat !== seer && !game.isWolf(p.role)).seat,
+  });
+  actFor(room.game.players.find((p) => p && p.alive && p.role === 'witch').seat, 'witch-move', { move: 'skip' });
+  assert.equal(room.game.phase, 'day');
+  assert.equal(room.game.subPhase, 'lastwords', '首夜有死者 → 遗言阶段');
+  actFor(victim, 'speak', { text: '我走了，大家按发言和票型好好盘。' });
+  assert.equal(room.game.subPhase, 'elect_join', '首夜遗言后 day 1 先上警表态（§2.2 时序）');
+
+  const daySnap = logic.snapshotFor(room, 1);
+  assert.equal(daySnap.subPhase, 'elect_join');
+  assert.equal(daySnap.election.stage, 'join');
+  assert.deepEqual(daySnap.election.candidates, []);
+  assert.deepEqual(daySnap.election.run, {}, '已表态映射公开（举手信息，§2.5）');
+
+  /* serverDrive（§4.2，waitingOwner 更名）：房主掉线 + 待行动为 AI/托管座位。
+     开局座位洗牌后 elect_join 待行动座位随机——先把真人表态完，余下 AI 待行动 */
+  let pend = game.pendingSeat(room.game);
+  while (room.game.subPhase === 'elect_join' && !room.game.players[pend - 1].isAI) {
+    actFor(pend, 'elect-run', { run: false });
+    pend = game.pendingSeat(room.game);
+  }
+  const off = structuredClone(room);
+  off.ownerOnline = false;
+  assert.equal(logic.snapshotFor(off, 1).serverDrive, true, 'AI 待行动且房主掉线 → serverDrive=true');
+  assert.equal('waitingOwner' in logic.snapshotFor(off, 1), false, '旧字段 waitingOwner 已废止');
+  assert.equal(logic.snapshotFor(room, 1).serverDrive, undefined, '房主在线不显示接管');
+
+  /* 快照键白名单（every-in 式合法键集，裁定 4；players 条目同查） */
+  const SNAP_KEYS = [
+    'code', 'owner', 'ownerOnline', 'abandoned', 'mySeat', 'phase', 'day', 'players',
+    'events', 'subPhase', 'pending', 'deadline', 'pkCandidates', 'winner', 'reason',
+    'board', 'sheriff', 'election', 'serverDrive', 'you', 'action', 'rev',
+  ];
+  for (const k of Object.keys(daySnap)) {
+    assert.ok(SNAP_KEYS.includes(k), `快照出现白名单外字段 ${k}`);
+  }
+  const PLAYER_KEYS = ['seat', 'nick', 'isAI', 'alive', 'hosted', 'idiotRevealed', 'ready', 'role', 'death'];
+  for (const p of daySnap.players) {
+    for (const k of Object.keys(p || {})) assert.ok(PLAYER_KEYS.includes(k), `players 条目出现白名单外字段 ${k}`);
   }
 });
 

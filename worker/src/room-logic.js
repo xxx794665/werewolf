@@ -14,7 +14,7 @@
  *   log:         游戏内公开事件（docs/ai-prompts.md §1.3 history schema）
  *   hosted:      托管座位号数组（§7.7 真人 >60s 无心跳转托管）
  *   heartbeats:  { uid → lastSeen }（在线窗口 35s）
- *   ownerOnline: 房主在线（掉线 → 快照显示「等待房主」，§7.6）
+ *   ownerOnline: 房主在线（掉线 → 快照 serverDrive=true，AI 已由服务端闹钟接管，§4.2 / ADR-0016）
  *   revs:        { 座位 → rev } 按座位视角各自计算的游标（ADR-0002）
  *   deadline:    { at, seat } 行动超时 150s（单机 = 真人 ≤1 不设）
  * ============================================================ */
@@ -25,10 +25,41 @@ import { buildMessages, clampMaxTokens, clipSpeech } from '../../shared/prompts.
 export const ACTION_TIMEOUT_MS = 150_000; // §5.11 行动超时（DO alarm）
 export const HOST_AFTER_MS = 60_000; // §7.7 无心跳转托管
 export const ONLINE_WINDOW_MS = 35_000; // §7.7 在线窗口
-export const OWNER_ABANDON_MS = 30 * 60_000; // §7.7 房主失联作废
+export const OWNER_ABANDON_MS = 30 * 60_000; // §7.7 作废窗口（§4.1 修订：全员失联口径，ADR-0016）
+export const AI_DRIVE_CADENCE_MS = 5_000; // §4.1（ADR-0016）闹钟接管节拍：房主掉线期间每 5s 驱动一拍
 
 const clone = (s) => structuredClone(s);
 const HUMANS = (g) => g.players.filter((p) => p && !p.isAI).length;
+
+/* §4.1（ADR-0016）全员最近心跳：任何真人（含房主）30 分钟内心跳出现过即不作废。
+ * 作废判定与 nextAlarmAt 的作废分量共用——旧公式只看房主会算出过去时刻，
+ * 被 Math.max(now+1,…) 钳成毫秒级 alarm 热循环烧 CF 配额（裁定 8）。 */
+function latestHumanSeen(room, g = room.game) {
+  let latest = room.createdAt; // 无心跳记录的兜底下界
+  for (const p of g.players) {
+    if (!p || p.isAI) continue;
+    const seen = room.heartbeats[p.uid] ?? room.createdAt;
+    if (seen > latest) latest = seen;
+  }
+  return latest;
+}
+
+/**
+ * §4.1（ADR-0016）闹钟接管条件（纯函数，测试直测）：联机中房主失联（35s 窗口）
+ * 且当前待行动座位是 AI / 托管座位 → DO alarm 以 AI_DRIVE_CADENCE_MS 节拍自动驱动。
+ * 房主心跳恢复即假 → 节拍自然停（房主客户端 4s 兜底节拍照常驱动）。
+ * abandoned 房间不再接管（applyGameAction 不查 abandoned，闸门必须在此拦）。
+ */
+export function alarmDriveDue(room, now) {
+  const g = room.game;
+  if (room.abandoned || (g.phase !== 'night' && g.phase !== 'day')) return false;
+  if (HUMANS(g) <= 1) return false; // 单机：客户端 soloDrive 自己驱动，服务端不接管
+  if (isOnline(room, now)) return false; // 房主在线（心跳直算，精确于 ownerOnline 懒标志）
+  const pending = game.pendingSeat(g);
+  if (pending == null) return false;
+  const p = g.players[pending - 1];
+  return !!(p && (p.isAI || room.hosted.includes(pending)));
+}
 
 /* ---------- 建房 ---------- */
 
@@ -103,6 +134,8 @@ export function phaseOf(g) {
   switch (`${g.phase}:${g.subPhase}`) {
     case 'night:wolf':
       return 'wolf';
+    case 'night:guard':
+      return 'guard'; // §1.3（ADR-0013）守卫守护
     case 'night:seer':
       return 'seer';
     case 'night:witch':
@@ -113,6 +146,19 @@ export function phaseOf(g) {
     case 'day:lastwords':
     case 'day:exile_lastwords':
       return 'lastwords';
+    case 'day:elect_join':
+      return 'elect_join'; // §2.6（ADR-0014）警长竞选
+    case 'day:elect_withdraw':
+      return 'elect_withdraw';
+    case 'day:elect_campaign':
+      return 'elect_campaign';
+    case 'day:elect_pk_speak':
+      return 'elect_pk_speak'; // 裁定 6：平票自辩单独成任务
+    case 'day:elect_vote':
+    case 'day:elect_pk_vote':
+      return 'elect_vote'; // §2.6：PK 轮与主轮同为警长票（候选集由任务文案收窄）
+    case 'day:badge':
+      return 'badge'; // §2.3 警徽处置
     case 'day:speak':
       return 'speak';
     case 'day:pk_speak':
@@ -126,11 +172,13 @@ export function phaseOf(g) {
   }
 }
 
-/** 本人私有字段（§4.1.6 夜里可见性：只有本人合法可知的信息）。 */
+/** 本人私有字段（§4.1.6 夜里可见性：只有本人合法可知的信息）。
+ *  §1.2（ADR-0013）狼王同口径：狼队名单 / 密聊 / 狼票 / 刀口 / 队长全按 isWolf；
+ *  §1.3 裁定 10：guardLast（昨晚守护座位）仅守卫座携带。 */
 function privateOf(g, me) {
   const you = { seat: me.seat, alive: !!me.alive, role: me.role };
-  if (me.role === 'werewolf') {
-    you.wolves = g.players.filter((p) => p && p.role === 'werewolf').map((p) => p.seat);
+  if (game.isWolf(me.role)) {
+    you.wolves = g.players.filter((p) => p && game.isWolf(p.role)).map((p) => p.seat);
     // §4.1.1 狼队密聊全程日志：跨夜保留，存活狼座白天也能回看（死者走观战视角，另无此字段）
     if (me.alive) you.wolfChatLog = g.wolfChatLog || [];
     if (g.phase === 'night' && me.alive && g.night) {
@@ -148,6 +196,10 @@ function privateOf(g, me) {
     const blade = game.witchSeesBlade(g); // 仅女巫子阶段且解药未用（§4.1.3）
     if (blade != null) you.blade = blade;
   }
+  if (me.role === 'guard') {
+    you.guardLast = g.guard && g.guard.last != null ? g.guard.last : null; // 裁定 10：连守限制依据
+  }
+  if (me.idiotRevealed) you.idiotRevealed = true; // §1.4：翻牌白痴失去投票权（本人提示）
   return you;
 }
 
@@ -179,6 +231,22 @@ export function snapshotFor(room, seat) {
   };
   if (!night) snap.subPhase = g.subPhase; // 夜里不露子阶段（§4.1.6）
   if (!night && pending != null) snap.pending = pending;
+  /* §1.6 / §2.5（ADR-0013/0014）公开层新字段（值稳定 / 公开信息，不破夜冻结）：
+   *   board：板子 id（hStart 落账起带；旧房缺省不带）；sheriff：警长座位（对局
+   *   全程公开，夜也带——警长身份是公开信息）；election：竞选公开举手信息
+   *   （仅白天竞选期间）；badge 不需要（pending 已在 snap.pending） */
+  if (g.board != null) snap.board = g.board;
+  if (g.sheriff) snap.sheriff = { seat: g.sheriff.seat == null ? null : g.sheriff.seat };
+  const el = g.sheriff && g.sheriff.election;
+  if (!night && el) {
+    snap.election = {
+      stage: el.stage,
+      candidates: (el.candidates || []).slice(),
+      ...(el.stage === 'join' ? { run: { ...el.run } } : {}),
+      ...(el.stage === 'withdraw' ? { quit: { ...el.quit } } : {}),
+      ...(el.pkCandidates && el.pkCandidates.length ? { pkCandidates: el.pkCandidates.slice() } : {}), // 裁定 11：PK 台名单（elect_pk_vote 面板候选）
+    };
+  }
   /* 行动倒计时（§5.11，吸顶状态条数据源）：白天全员可见；夜里仅行动者本人
      可见——deadline.seat 即轮到谁，透给非行动座位会泄漏夜里行动顺序（§4.1.6），
      行动者本人本就知道轮到自己，无新信息 */
@@ -192,6 +260,7 @@ export function snapshotFor(room, seat) {
     if (!p) return null;
     const entry = { seat: p.seat, nick: p.nick, isAI: !!p.isAI, alive: !!p.alive };
     if (room.hosted.includes(p.seat)) entry.hosted = true; // 托管标（§7.7 公开）
+    if (p.idiotRevealed) entry.idiotRevealed = true; // §1.4（ADR-0013）白痴翻牌态：vote_result 公开事件已宣告，属公开信息
     if (g.phase === 'lobby') entry.ready = !!p.ready;
     if (revealed || spectator || p.seat === seat) {
       entry.role = p.role;
@@ -201,12 +270,12 @@ export function snapshotFor(room, seat) {
   });
   if (me) snap.you = privateOf(g, me);
   if (me && pending === me.seat && phaseOf(g)) snap.action = { kind: phaseOf(g) };
-  else if (me && me.alive && me.role === 'werewolf' && g.phase === 'night' && g.subPhase === 'wolf') {
-    snap.action = { kind: 'wolf' }; // §4.1.1 狼队密聊+投票全员开放；非狼座位绝不带此字段
+  else if (me && me.alive && game.isWolf(me.role) && g.phase === 'night' && g.subPhase === 'wolf') {
+    snap.action = { kind: 'wolf' }; // §4.1.1 狼队密聊+投票全员开放（§1.2 狼王同口径）；非狼座位绝不带此字段
   }
   if (!revealed && g.phase !== 'lobby' && pending != null && !room.ownerOnline) {
     const p = g.players[pending - 1];
-    if (p && (p.isAI || room.hosted.includes(pending))) snap.waitingOwner = true; // §7.6 等待房主
+    if (p && (p.isAI || room.hosted.includes(pending))) snap.serverDrive = true; // §4.2（ADR-0016）waitingOwner 更名：服务端闹钟已接管
   }
   return snap;
 }
@@ -265,13 +334,40 @@ function toHistory(ev) {
     case 'vote_result': {
       const out = [];
       if (ev.pk) out.push({ t: 'tie', day: ev.day, seats: ev.pk });
-      out.push({ t: 'exile', day: ev.day, seat: ev.exiled == null ? null : ev.exiled });
+      /* §1.5（ADR-0013）白痴翻牌免死标记：仅 idiot:true 时带字段，缺省省略保旧形状 */
+      const exile = { t: 'exile', day: ev.day, seat: ev.exiled == null ? null : ev.exiled };
+      if (ev.idiot) exile.idiot = true;
+      out.push(exile);
       return out;
     }
     case 'hunter_shoot':
-      return [{ t: 'hunter', day: ev.day, seat: ev.seat, target: ev.target }];
-    case 'hunter_skip':
-      return [{ t: 'hunter', day: ev.day, seat: ev.seat, target: null }];
+    case 'hunter_skip': {
+      /* §1.5（ADR-0013）狼王翻牌可选 role：仅带值时写字段，缺省省略按猎人渲染 */
+      const h = { t: 'hunter', day: ev.day, seat: ev.seat, target: ev.type === 'hunter_skip' ? null : ev.target };
+      if (ev.role) h.role = ev.role;
+      return [h];
+    }
+    /* ---------- 警长竞选与警徽流（附录 t-schema 最终版，ADR-0014） ---------- */
+    case 'elect_run':
+      return [{ t: 'elect_run', day: ev.day, seat: ev.seat, run: ev.run }];
+    case 'elect_speech':
+      return [{ t: 'elect_speech', day: ev.day, seat: ev.seat, text: ev.text }];
+    case 'elect_withdraw':
+      return [{ t: 'elect_withdraw', day: ev.day, seat: ev.seat, quit: ev.quit }];
+    case 'elect_vote':
+      return [{ t: 'elect_vote', day: ev.day, voter: ev.seat, target: ev.target }];
+    case 'sheriff_result': {
+      const s = { t: 'sheriff', day: ev.day, kind: ev.kind };
+      if (ev.seat != null) s.seat = ev.seat;
+      if (ev.pk != null) s.pk = ev.pk;
+      return [s];
+    }
+    case 'badge_move': {
+      /* badge_move 并入 t:'sheriff'（kind transfer/destroy，带 from/to，附录最终版） */
+      const b = { t: 'sheriff', day: ev.day, kind: ev.to == null ? 'destroy' : 'transfer', from: ev.from };
+      if (ev.to != null) b.to = ev.to;
+      return [b];
+    }
     default:
       return []; // game_start / game_over（快照从 state 读）、hunter_flip（并入 hunter 事件）
   }
@@ -284,9 +380,18 @@ const GAME_ACTIONS = {
   vote: (b, seat) => ({ type: 'vote', seat, target: b.target }),
   'wolf-chat': (b, seat) => ({ type: 'wolf_chat', seat, text: b.text }),
   'wolf-target': (b, seat) => ({ type: 'wolf_target', seat, target: b.target }),
+  'guard-protect': (b, seat) => ({ type: 'guard_protect', seat, target: b.target }), // §1.3（ADR-0013）守卫守护
   'seer-check': (b, seat) => ({ type: 'seer_check', seat, target: b.target }),
   'witch-move': (b, seat) => ({ type: 'witch_move', seat, move: b.move, target: b.target }),
   'hunter-shoot': (b, seat) => ({ type: 'hunter_shoot', seat, target: b.target }),
+  /* §2.6（ADR-0014）警长竞选与警徽流路由：body 字段透传，形状校验交内核
+   * （run/quit 非布尔 → 内核 fail，不静默降级）；badge 阶段行动者是死亡警长，
+   * resolveActor 本人 uid 直投 / 房主 seat 代打与遗言死者同权限模型（B3-5） */
+  'elect-run': (b, seat) => ({ type: 'elect_run', seat, run: b.run }),
+  'elect-speak': (b, seat) => ({ type: 'elect_speak', seat, text: b.text }),
+  'elect-withdraw': (b, seat) => ({ type: 'elect_withdraw', seat, quit: b.quit }),
+  'elect-vote': (b, seat) => ({ type: 'elect_vote', seat, target: b.target }),
+  'badge-move': (b, seat) => ({ type: 'badge_move', seat, target: b.target }),
 };
 
 /**
@@ -370,8 +475,10 @@ export function applyAction(room, httpAction, body, ctx) {
       if (body.uid !== room.ownerUid) return { error: '仅房主可以开始游戏' };
       if (!Number.isInteger(ctx.seed)) return { error: '缺少发牌种子' };
       /* roster = DO 壳用 shared/roster.js 抽好的开局名册（人格 × 网名，与身份无关，
-         ADR-0009）；缺席时内核回退默认昵称 AI-n（部署过渡 / 旧调用方兼容） */
-      const r = game.advance(room.game, { type: 'start', seed: ctx.seed, roster: ctx.roster });
+         ADR-0009）；缺席时内核回退默认昵称 AI-n（部署过渡 / 旧调用方兼容）。
+         board = 房主在大厅选的板子 id（§1.1，ADR-0013）：透传给内核 hStart 校验
+         （非法 → fail「未知板子」→ 400）；缺省不传由内核落 'standard'（旧客户端兼容）。 */
+      const r = game.advance(room.game, { type: 'start', seed: ctx.seed, roster: ctx.roster, board: ctx.board });
       if (r.error) return { error: r.error };
       const draft = clone(room);
       draft.game = r.state;
@@ -403,10 +510,17 @@ export function applyAction(room, httpAction, body, ctx) {
 
 /* ---------- ai_view（owner 专属，ADR-0002） ---------- */
 
-/* game 内核角色名 → AI 契约角色名（docs/ai-prompts.md §1.2：wolf/villager/seer/witch/hunter） */
-const PROMPT_ROLE = { werewolf: 'wolf', villager: 'villager', seer: 'seer', witch: 'witch', hunter: 'hunter' };
+/* game 内核角色名 → AI 契约角色名（docs/ai-prompts.md §1.2）；
+ * §1.2–1.4（ADR-0013）三新角色契约名与内核同名，显式列出防漂移（双份同口径） */
+const PROMPT_ROLE = {
+  werewolf: 'wolf', wolfking: 'wolfking', villager: 'villager', seer: 'seer',
+  witch: 'witch', hunter: 'hunter', guard: 'guard', idiot: 'idiot',
+};
 
-/** 该座位自己的身份卡（docs/ai-prompts.md §1.2 roleCard schema）。 */
+/** 该座位自己的身份卡（docs/ai-prompts.md §1.2 roleCard schema）。
+ *  §1.6 / 裁定 9–10（ADR-0013/0014）：board / sheriff / election 是公开层字段
+ *  （roster 同款先例），guardLast 是守卫私有字段（仅守卫座携带）。
+ *  与 js/ai.js roleCardOf 双份同口径（ADR-0004）。 */
 export function roleCardOf(g, seat) {
   const p = g.players[seat - 1];
   if (!p) return null;
@@ -415,8 +529,15 @@ export function roleCardOf(g, seat) {
    * 本人 persona（开局名册抽取的言行风格，非身份信息）只对 AI 座位存在 */
   card.roster = g.players.filter(Boolean).map((x) => ({ seat: x.seat, nick: x.nick }));
   if (p.persona) card.persona = p.persona;
-  if (p.role === 'werewolf') {
-    card.wolves = g.players.filter((x) => x && x.role === 'werewolf').map((x) => x.seat);
+  card.board = g.board || 'standard'; // §1.6 板子 id（旧房间 g.board 缺失兜底）
+  card.sheriff = g.sheriff && g.sheriff.seat != null ? g.sheriff.seat : null; // 裁定 9：警长座位公开
+  const el = g.sheriff && g.sheriff.election;
+  if (el) {
+    /* 裁定 9/11：竞选公开层——主轮 elect_vote 候选来源 + PK 台名单 */
+    card.election = { candidates: (el.candidates || []).slice(), pk: (el.pkCandidates || []).slice() };
+  }
+  if (game.isWolf(p.role)) {
+    card.wolves = g.players.filter((x) => x && game.isWolf(x.role)).map((x) => x.seat); // §1.2 狼王同列
     card.wolfChatLog = g.wolfChatLog || []; // §4.1.1 狼队私有频道全程日志（跨夜保留；白天任务也带）
     if (g.phase === 'night' && g.subPhase === 'wolf' && g.night) {
       card.wolfVotes = g.night.wolfVotes || {};
@@ -430,6 +551,9 @@ export function roleCardOf(g, seat) {
   }
   const blade = game.witchSeesBlade(g);
   if (p.role === 'witch' && blade != null) card.knifeTarget = blade; // 仅女巫行动夜（§1.2）
+  if (p.role === 'guard') {
+    card.guardLast = g.guard && g.guard.last != null ? g.guard.last : null; // 裁定 10：连守限制依据（仅守卫座携带）
+  }
   return card;
 }
 
@@ -440,8 +564,8 @@ export function aiView(room, seat) {
   if (!card) return { error: '座位不存在' };
   const p = g.players[seat - 1];
   const view = { ...card, nick: p.nick, isAI: !!p.isAI, hosted: room.hosted.includes(seat) };
-  if (p.role === 'werewolf' && g.phase === 'night' && g.night && g.night.blade != null) {
-    view.blade = g.night.blade; // 存活狼当晚知晓刀口（§4.1.6）
+  if (game.isWolf(p.role) && g.phase === 'night' && g.night && g.night.blade != null) {
+    view.blade = g.night.blade; // 存活狼当晚知晓刀口（§4.1.6；§1.2 狼王同口径，ADR-0013）
   }
   return { view };
 }
@@ -458,12 +582,24 @@ function digestOfDay(day, evs) {
       parts.push(ev.seats.length ? `昨晚 ${ev.seats.join('、')} 号死亡` : '平安夜');
     } else if (ev.t === 'exile') {
       if (ev.seat != null) {
-        dead.add(ev.seat);
-        parts.push(`${ev.seat} 号被放逐`);
+        /* §1.4（ADR-0013）白痴翻牌免死：存活（只失去投票权），不得计入 dead
+         * ——否则 buildMessages 的存活推导出错，后续动作全部干跑失败 */
+        if (ev.idiot === true) parts.push(`${ev.seat} 号翻牌白痴，放逐无效`);
+        else {
+          dead.add(ev.seat);
+          parts.push(`${ev.seat} 号被放逐`);
+        }
       } else parts.push('无人出局');
     } else if (ev.t === 'hunter' && ev.target != null) {
       dead.add(ev.target);
-      parts.push(`猎人 ${ev.seat} 号带走 ${ev.target} 号`);
+      /* §1.5（ADR-0013）狼王翻牌带走人：文案按 role 泛化，dead 推导不变 */
+      parts.push(`${ev.role === 'wolfking' ? '狼王' : '猎人'} ${ev.seat} 号带走 ${ev.target} 号`);
+    } else if (ev.t === 'sheriff') {
+      /* 裁定 9（ADR-0014）：警长信息保留一行摘要——老天数 AI 才推得出警长与
+       * 1.5 票；elect_* 压缩丢弃可接受（竞选仅 day 1） */
+      if (ev.kind === 'elected') parts.push(`${ev.seat} 号当选警长`);
+      else if (ev.kind === 'transfer') parts.push(`警徽移交给 ${ev.to} 号`);
+      else if (ev.kind === 'destroy') parts.push('警长撕毁警徽');
     }
   }
   return { t: 'digest', day, dead: [...dead].sort((a, b) => a - b), text: parts.join('，') || '平安日' };
@@ -550,20 +686,44 @@ function cleanChat(line) {
   return t.slice(0, 60); // 与内核 WOLF_CHAT_MAX 同口径截断
 }
 
-/** §5.1 宽容解析：先判 save / skip，再取第一个 1–9 数字；失败返回 null（回退）。
- *  狼阶段不走此函数（两行格式，见 parseWolfReply）。 */export function parseAIReply(phase, text) {
+/** §5.1 宽容解析：先判竞选二选一关键字与 save / skip，再取第一个 1–9 数字；
+ *  失败返回 null（回退）。狼阶段不走此函数（两行格式，见 parseWolfReply）。
+ *  §1.3 / §2.6（ADR-0013/0014）扩：guard / elect_* / badge 分支——
+ *  竞选发言（elect_campaign / elect_pk_speak）与发言三元组同步扩（裁定 5），
+ *  动作走 elect_speak（hElectSpeak 队列）；elect_join 的 run/pass、
+ *  elect_withdraw 的 quit/stay 关键字必须先于通用 skip/pass 判定（B3-1：
+ *  elect_join 的 pass=不上警与既有 pass=skip 弃票语义撞车）；
+ *  badge 的 skip = 撕毁警徽。与 js/ai.js parseReply 双份同口径（ADR-0004）。 */
+export function parseAIReply(phase, text) {
   if (typeof text !== 'string') return null;
   if (phase === 'speak' || phase === 'lastwords' || phase === 'pk_speak') {
     const t = clipSpeech(text.trim(), game.SPEECH_MAX); // 硬上限 250 字、按句收尾（§5.8 / ADR-0012）
     return t ? { type: 'speak', text: t } : null;
   }
+  if (phase === 'elect_campaign' || phase === 'elect_pk_speak') {
+    const t = clipSpeech(text.trim(), game.SPEECH_MAX); // 裁定 5：竞选发言同款截断；动作走 elect_speak
+    return t ? { type: 'elect_speak', text: t } : null;
+  }
   const s = text.trim().toLowerCase().replace(/[\s.,;:!?，。；：！？、"'`()[\]{}<>《》-]/g, '');
+  /* §2.6 竞选二选一关键字（先于通用 skip/pass，B3-1 顺序陷阱） */
+  if (phase === 'elect_join') {
+    if (s === 'run') return { type: 'elect_run', run: true };
+    if (s === 'pass') return { type: 'elect_run', run: false };
+    return null;
+  }
+  if (phase === 'elect_withdraw') {
+    if (s === 'quit') return { type: 'elect_withdraw', quit: true };
+    if (s === 'stay') return { type: 'elect_withdraw', quit: false };
+    return null;
+  }
   if (s === 'save') return phase === 'witch' ? { type: 'witch_move', move: 'save' } : null;
   if (s === 'skip' || s === 'pass') {
     if (phase === 'witch') return { type: 'witch_move', move: 'skip' };
     if (phase === 'hunter') return { type: 'hunter_shoot', target: null };
     if (phase === 'vote' || phase === 'pk_vote') return { type: 'vote', target: null };
-    return null; // wolf / seer 不可 skip（§5.10 / §4.1.2）→ 解析失败走回退
+    if (phase === 'elect_vote') return { type: 'elect_vote', target: null }; // 警长票弃票（§2.3）
+    if (phase === 'badge') return { type: 'badge_move', target: null }; // skip = 撕毁警徽（§2.6）
+    return null; // wolf / seer / guard 不可 skip（§5.10 / §4.1.2 / §1.3）→ 解析失败走回退
   }
   const m = s.match(/[1-9]/);
   if (!m) return null;
@@ -578,6 +738,12 @@ function cleanChat(line) {
     case 'vote':
     case 'pk_vote':
       return { type: 'vote', target: n };
+    case 'guard':
+      return { type: 'guard_protect', target: n }; // §1.3 守卫：座位号，不可跳过
+    case 'elect_vote':
+      return { type: 'elect_vote', target: n };
+    case 'badge':
+      return { type: 'badge_move', target: n }; // 座位号 = 移交警徽（§2.6）
     default:
       return null;
   }
@@ -615,14 +781,16 @@ export function digestAIReply(g, phase, seat, text) {
   }
 }
 
-/* ---------- sweep（DO alarm：托管 / 行动超时 / 房主作废，§7.7） ---------- */
+/* ---------- sweep（DO alarm：托管 / 行动超时 / 全员失联作废，§7.7 + §4.1，ADR-0016） ---------- */
 
 /**
  * 时钟驱动的房间巡检（纯函数，DO alarm 与每次请求后可调）：
  *   1. 真人 >60s 无心跳 → 转托管（联机，真人 >1）；
  *   2. 行动超时 150s → 确定性回退推进 + 该座位转托管（§5.11）；
- *   3. 房主失联 >30min → 房间作废（联机 only；单机无他人等待，不做）；
- *   4. 房主在线翻转（35s 窗口）。
+ *   3. 全员（任何真人）失联 >30min → 房间作废（§4.1 作废口径修订，ADR-0016；
+ *      房主早掉线而他人仍在时游戏由服务端闹钟接管继续，不作废）；
+ *   4. 房主在线翻转（35s 窗口，仍按房主本人心跳——ownerOnline 语义是
+ *      「房主在线」，serverDrive 与文案都依赖它，不随作废口径一并改）。
  * 返回 { room, changed }；changed=false 时 DO 无需持久化。
  */
 export function sweep(room, now) {
@@ -633,11 +801,11 @@ export function sweep(room, now) {
   }
   if (HUMANS(g) <= 1) return { room: draft, changed: false }; // 单机：不超时不作废（§5.11 / §6）
   let changed = false;
-  const ownerSeen = draft.heartbeats[draft.ownerUid] ?? draft.createdAt;
-  if (now - ownerSeen > OWNER_ABANDON_MS) {
-    draft.abandoned = true; // §7.7 作废只读
+  if (now - latestHumanSeen(draft, g) > OWNER_ABANDON_MS) {
+    draft.abandoned = true; // §4.1（ADR-0016）全员失联 30min 作废只读；作废文案不变
     changed = true;
   } else {
+    const ownerSeen = draft.heartbeats[draft.ownerUid] ?? draft.createdAt;
     const online = now - ownerSeen <= ONLINE_WINDOW_MS;
     if (online !== !!draft.ownerOnline) {
       draft.ownerOnline = online;
@@ -673,7 +841,11 @@ export function sweep(room, now) {
   return { room: draft, changed };
 }
 
-/** 下一次 alarm 时刻；null = 无需计时。 */
+/** 下一次 alarm 时刻；null = 无需计时。
+ *  §4.1（ADR-0016）：alarmDriveDue 满足时推 now + AI_DRIVE_CADENCE_MS——
+ *  alarm 以 5s 节拍持续重排，直到房主回归或游戏结束；作废分量连根改
+ *  latestHumanSeen（裁定 8：旧公式 ownerSeen+30min 在房主久掉线而他人在线时
+ *  算出过去时刻，被 max(now+1) 钳成毫秒级热循环烧 CF alarm 配额）。 */
 export function nextAlarmAt(room, now) {
   const g = room.game;
   if (room.abandoned || (g.phase !== 'night' && g.phase !== 'day')) return null;
@@ -681,11 +853,13 @@ export function nextAlarmAt(room, now) {
   if (room.deadline) times.push(room.deadline.at);
   if (HUMANS(g) > 1) {
     const ownerSeen = room.heartbeats[room.ownerUid] ?? room.createdAt;
-    times.push(ownerSeen + (room.ownerOnline ? ONLINE_WINDOW_MS : OWNER_ABANDON_MS));
+    if (room.ownerOnline) times.push(ownerSeen + ONLINE_WINDOW_MS); // 房主掉线检测（ownerOnline 翻转点）
+    times.push(latestHumanSeen(room, g) + OWNER_ABANDON_MS); // §4.1 作废分量（全员失联口径，裁定 8）
     for (const p of g.players) {
       if (!p || p.isAI || !p.alive || room.hosted.includes(p.seat)) continue;
       times.push((room.heartbeats[p.uid] ?? room.createdAt) + HOST_AFTER_MS);
     }
+    if (alarmDriveDue(room, now)) times.push(now + AI_DRIVE_CADENCE_MS); // 闹钟接管节拍（门在 HUMANS>1 内，单机恒 null）
   }
   if (!times.length) return null;
   return Math.max(now + 1, Math.min(...times));

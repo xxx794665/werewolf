@@ -14,6 +14,13 @@
  *      tie 认领结果不被成对 exile{null} 覆盖、得票重算排序、平安日 / 进行中）
  *   8. ui.js 日志按天折叠：groupLogEvents 分组纯函数（按天升序、组内保序、
  *      成对 exile{null} 跳过、平安日不误删）（2026-10-05 试玩反馈）
+ *   9. voteHistory 扩展（§2.4/§2.5，ADR-0014）：警长竞选轮次（elect/elect_pk、
+ *      tie-pk 分轮界）、警长 1.5 票权重与移交 / 撕毁换权重
+ *  10. groupLogEvents 吸收竞选 / 警长事件（additive，旧日志输出不变）
+ *  11. js/archive.js 存档纯函数（§3.1，ADR-0015）：记录形状与 won 判定
+ *     （狼王 = 狼侧）、mergeArchive 幂等与上限、aggregateStats 排除 AI
+ *  12. roleCardOf 三新角色与新公开层字段（狼王 / 守卫 / 白痴板逐座位，
+ *     board/sheriff/election/guardLast，§1.6 / 裁定 9–10）+ 旧形状兜底
  * 运行：node --test test/frontend.test.mjs
  * ============================================================ */
 
@@ -29,10 +36,10 @@ import { ICONS, icon } from "../js/icons.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-/* ---------- 1. 模块加载（骨架纪律的延续：8 个 ESM 模块加载验证） ---------- */
+/* ---------- 1. 模块加载（骨架纪律的延续：7 个 ESM 模块加载验证） ---------- */
 
 test("全部 js 模块可在 node 环境直接 import（顶层无 DOM 依赖）", async () => {
-  for (const m of ["../js/icons.js", "../js/prompts.js", "../js/net.js", "../js/ai.js", "../js/ui.js", "../js/app.js"]) {
+  for (const m of ["../js/icons.js", "../js/prompts.js", "../js/net.js", "../js/ai.js", "../js/archive.js", "../js/ui.js", "../js/app.js"]) {
     await import(m); // 抛错即失败
   }
 });
@@ -199,6 +206,65 @@ test("单机身份卡：roleCardOf 按角色白名单出私有字段", () => {
   }
 });
 
+test("roleCardOf：三新角色与新公开层字段（狼王 / 守卫 / 白痴板逐座位）+ 旧形状兜底（§1.6 / 裁定 9–10）", () => {
+  const start = (board, seed = 11) => {
+    let s = game.advance(game.createInitialState(), { type: "join", nick: "独行", uid: "u1" }).state;
+    s = game.advance(s, { type: "ready", seat: 1, ready: true }).state;
+    const r = game.advance(s, { type: "start", seed, solo: true, board });
+    assert.equal(r.error, null);
+    return r.state;
+  };
+  /* 狼王板：狼王卡处处视作狼（wolves 含狼王座、密聊 / 狼票 / 队长齐备），board 落卡（§1.2 / §1.6） */
+  const wkGame = start("wolfking");
+  assert.equal(wkGame.phase, "night"); // 夜 1 狼阶段：狼私有字段齐出
+  const wkSeat = wkGame.players.find((p) => p.role === "wolfking").seat;
+  const wkCard = ai.roleCardOf(wkGame, wkSeat);
+  assert.equal(wkCard.role, "wolfking", "契约名与内核同名（防漂移显式列出）");
+  assert.equal(wkCard.board, "wolfking");
+  assert.equal(wkCard.wolves.length, 3, "2 狼人 + 1 狼王全列");
+  assert.ok(wkCard.wolves.includes(wkSeat));
+  assert.deepEqual(wkCard.wolfChatLog, []);
+  assert.deepEqual(wkCard.wolfVotes, {});
+  assert.equal(typeof wkCard.captain, "number");
+  assert.equal(wkCard.sheriff, null, "夜 1 未竞选 → 警长座位 null（裁定 9）");
+  assert.equal("election" in wkCard, false, "非竞选期不带 election");
+  assert.equal("guardLast" in wkCard, false, "非守卫座位不带 guardLast（裁定 10）");
+  /* 守卫板：仅守卫座带 guardLast（昨晚守护座位，连守限制依据） */
+  const gGame = start("guard");
+  const gSeat = gGame.players.find((p) => p.role === "guard").seat;
+  const gCard = ai.roleCardOf(gGame, gSeat);
+  assert.equal(gCard.role, "guard");
+  assert.equal(gCard.board, "guard");
+  assert.equal(gCard.guardLast, null, "夜 1 未守护 → null");
+  assert.equal(gCard.wolves, undefined, "守卫不带狼队信息");
+  for (let seat = 1; seat <= 9; seat++) {
+    if (seat === gSeat) continue;
+    assert.equal("guardLast" in ai.roleCardOf(gGame, seat), false, `非守卫座位 ${seat} 不得带 guardLast`);
+  }
+  /* 白痴板：白痴卡契约名同名、无狼队私有信息（被动技能角色） */
+  const iGame = start("idiot");
+  const iCard = ai.roleCardOf(iGame, iGame.players.find((p) => p.role === "idiot").seat);
+  assert.equal(iCard.role, "idiot");
+  assert.equal(iCard.board, "idiot");
+  assert.equal(iCard.wolves, undefined);
+  /* 竞选中 + 警长已定：公开层 board / sheriff / election（裁定 9/11：主轮候选 + PK 台名单） */
+  const elGame = start("standard", 13);
+  elGame.phase = "day";
+  elGame.subPhase = "elect_vote";
+  elGame.sheriff = { seat: 5, election: { stage: "vote", run: {}, candidates: [2, 3], quit: {}, votes: { cast: {} }, queue: [], pkCandidates: [2, 3] } };
+  const elCard = ai.roleCardOf(elGame, 2);
+  assert.equal(elCard.sheriff, 5);
+  assert.deepEqual(elCard.election, { candidates: [2, 3], pk: [2, 3] });
+  /* 旧形状兜底（旧存档 / 部署窗口期旧房无 board/sheriff）：board 回 standard、sheriff null、无 election */
+  const legacy = start("standard", 17);
+  delete legacy.board;
+  delete legacy.sheriff;
+  const lCard = ai.roleCardOf(legacy, 1);
+  assert.equal(lCard.board, "standard", "g.board 缺失兜底 standard（js/ai.js 客户端组卡路径）");
+  assert.equal(lCard.sheriff, null);
+  assert.equal("election" in lCard, false);
+});
+
 /* ---------- 5. 玩家标签（私人笔记：scope 生命周期 + 校验 + localStorage 持久化） ---------- */
 
 /** 内存 localStorage 顶替（node 无 webstorage；ui.js 调用时才读 global） */
@@ -319,6 +385,7 @@ test("voteHistory：主/PK 分轮、tie 认领结果、得票重算排序、平�
       { voter: 4, target: null },
     ],
     outcome: { type: "pk", seats: [2, 5] },
+    sheriff: null, // 无 sheriff 事件的旧日志：不加权（§2.4 权重字段，恒 null）
     tally: [
       { seat: 5, count: 2 },
       { seat: 2, count: 1 },
@@ -336,6 +403,145 @@ test("voteHistory：主/PK 分轮、tie 认领结果、得票重算排序、平�
   assert.equal(rounds[3].outcome, null); // 无 tie/exile 收尾 = 进行中
   assert.deepEqual(ui.voteHistory([]), []);
   assert.deepEqual(ui.voteHistory(null), []);
+});
+
+/* ---------- 9. voteHistory 扩展：警长竞选轮次 + 警长 1.5 票权重（§2.4 / §2.5，ADR-0014） ---------- */
+
+test("voteHistory：竞选轮按天分组与 tie-pk 分轮界、elected 收尾、警长票计 1.5、移交换权重", async () => {
+  const ui = await import("../js/ui.js");
+  const rounds = ui.voteHistory([
+    { t: "elect_vote", day: 1, voter: 4, target: 2 },
+    { t: "elect_vote", day: 1, voter: 5, target: 2 },
+    { t: "elect_vote", day: 1, voter: 6, target: 7 },
+    { t: "elect_vote", day: 1, voter: 8, target: null }, // 竞选弃票
+    { t: "sheriff", day: 1, kind: "tie-pk", pk: [2, 7] }, // 竞选主轮平票 → PK 分界
+    { t: "elect_vote", day: 1, voter: 4, target: 2 },
+    { t: "elect_vote", day: 1, voter: 5, target: 7 },
+    { t: "sheriff", day: 1, kind: "elected", seat: 2 }, // 2 号当选
+    { t: "vote", day: 1, voter: 2, target: 8 }, // 警长票 1.5
+    { t: "vote", day: 1, voter: 3, target: 8 },
+    { t: "exile", day: 1, seat: 8 },
+    { t: "sheriff", day: 2, kind: "transfer", from: 2, to: 5 }, // 警徽移交 5 号
+    { t: "vote", day: 2, voter: 5, target: 9 }, // 新警长票 1.5
+    { t: "vote", day: 2, voter: 6, target: 9 },
+    { t: "exile", day: 2, seat: 9 },
+  ]);
+  assert.equal(rounds.length, 4);
+  /* 竞选主轮：kind elect、tie-pk 收尾、警长未产生不加权 */
+  assert.deepEqual(rounds[0], {
+    day: 1,
+    kind: "elect",
+    votes: [
+      { voter: 4, target: 2 },
+      { voter: 5, target: 2 },
+      { voter: 6, target: 7 },
+      { voter: 8, target: null },
+    ],
+    outcome: { type: "pk", seats: [2, 7] },
+    sheriff: null,
+    tally: [
+      { seat: 2, count: 2 },
+      { seat: 7, count: 1 },
+    ],
+  });
+  /* 竞选 PK 轮：kind elect_pk、elected 收尾 */
+  assert.equal(rounds[1].kind, "elect_pk");
+  assert.deepEqual(rounds[1].outcome, { type: "elected", seat: 2 });
+  assert.deepEqual(rounds[1].tally, [
+    { seat: 2, count: 1 },
+    { seat: 7, count: 1 },
+  ]);
+  /* 放逐主投票：警长 2 号一票计 1.5（§2.4） */
+  assert.equal(rounds[2].kind, "main");
+  assert.equal(rounds[2].sheriff, 2);
+  assert.deepEqual(rounds[2].tally, [{ seat: 8, count: 2.5 }]);
+  /* 警徽移交后：5 号接任警长，其票计 1.5；2 号不再加权 */
+  assert.equal(rounds[3].sheriff, 5);
+  assert.deepEqual(rounds[3].tally, [{ seat: 9, count: 2.5 }]);
+});
+
+test("voteHistory：竞选无人当选 / 警徽撕毁后不再加权", async () => {
+  const ui = await import("../js/ui.js");
+  const rounds = ui.voteHistory([
+    { t: "elect_vote", day: 1, voter: 4, target: 2 },
+    { t: "sheriff", day: 1, kind: "none" }, // 再平无警长
+    { t: "vote", day: 1, voter: 2, target: 8 },
+    { t: "exile", day: 1, seat: 8 },
+  ]);
+  assert.equal(rounds[0].kind, "elect");
+  assert.deepEqual(rounds[0].outcome, { type: "none" });
+  assert.equal(rounds[1].sheriff, null); // 无警长 → 1 票
+  assert.deepEqual(rounds[1].tally, [{ seat: 8, count: 1 }]);
+  const destroyed = ui.voteHistory([
+    { t: "sheriff", day: 1, kind: "elected", seat: 3 },
+    { t: "sheriff", day: 2, kind: "destroy", from: 3 }, // 撕毁 → 本局无警长
+    { t: "vote", day: 2, voter: 3, target: 6 },
+    { t: "exile", day: 2, seat: 6 },
+  ]);
+  assert.equal(destroyed[0].sheriff, null);
+  assert.deepEqual(destroyed[0].tally, [{ seat: 6, count: 1 }]);
+});
+
+/* ---------- 10. groupLogEvents 吸收警长竞选事件（§2.5 additive：旧日志输出不变） ---------- */
+
+test("groupLogEvents：elect_run / elect_speech / elect_withdraw / elect_vote / sheriff 按天归组", async () => {
+  const ui = await import("../js/ui.js");
+  const groups = ui.groupLogEvents([
+    { t: "deaths", day: 1, seats: [] },
+    { t: "elect_run", day: 1, seat: 2, run: true },
+    { t: "elect_speech", day: 1, seat: 2, text: "我是好人" },
+    { t: "elect_withdraw", day: 1, seat: 3, quit: true },
+    { t: "elect_vote", day: 1, voter: 4, target: 2 },
+    { t: "sheriff", day: 1, kind: "elected", seat: 2 },
+    { t: "sheriff", day: 2, kind: "transfer", from: 2, to: 5 },
+  ]);
+  assert.deepEqual(groups.map((g) => [g.day, g.events.length]), [[1, 6], [2, 1]]);
+  assert.equal(groups[0].events[5].kind, "elected");
+});
+
+/* ---------- 11. 本地存档纯函数（§3.1，ADR-0015）：形状 / won 判定 / 去重上限 / 真人聚合 ---------- */
+
+test("archive：buildArchiveRecord 形状与 won 判定（狼王 = 狼侧）、mergeArchive 幂等与上限、aggregateStats 排除 AI", async () => {
+  const arc = await import("../js/archive.js");
+  const state = {
+    board: "wolfking",
+    seed: 1234,
+    winner: "wolf",
+    reason: "parity",
+    day: 3,
+    players: [
+      { seat: 1, nick: "阿明", isAI: false, role: "wolfking" },
+      { seat: 2, nick: "AI-1", isAI: true, role: "seer", death: { day: 2, cause: "blade" } },
+      { seat: 3, nick: "阿明", isAI: false, role: "villager", death: { day: 3, cause: "exile" } },
+    ],
+  };
+  const rec = arc.buildArchiveRecord(state, [{ t: "deaths", day: 1, seats: [] }], { mode: "solo" });
+  assert.equal(rec.id, "solo:1234"); // 缺省按 seed 推导（幂等键）
+  assert.equal(rec.board.name, "狼王板");
+  assert.equal(rec.players[0].won, true); // 狼王 = 狼侧（ADR-0013）
+  assert.equal(rec.players[1].won, false);
+  assert.equal(rec.players[1].death.day, 2); // death 透传
+  assert.equal(rec.log.length, 1);
+  /* 联机形状（快照 players 无 seed）+ 显式 id */
+  const rec2 = arc.buildArchiveRecord({ winner: "good", day: 5, players: [] }, [], { mode: "online", id: "online:ABC234" });
+  assert.equal(rec2.id, "online:ABC234");
+  assert.equal(rec2.board.id, "standard"); // 无 board 字段 → 标准板兜底（旧房兼容）
+  /* mergeArchive：同 id 去重幂等 + unshift + 上限 30 丢最旧 */
+  const once = arc.mergeArchive([], rec);
+  assert.equal(arc.mergeArchive(once, rec).length, 1);
+  let list = [];
+  for (let i = 0; i < 35; i++) list = arc.mergeArchive(list, { ...rec, id: `solo:${i}` });
+  assert.equal(list.length, 30);
+  assert.equal(list[0].id, "solo:34"); // 最新在前
+  assert.equal(list.some((r) => r.id === "solo:4"), false); // 最旧被丢
+  /* aggregateStats：同昵称跨记录聚合、排除 isAI、胜率 */
+  const stats = arc.aggregateStats([rec]);
+  assert.equal(stats.length, 1);
+  assert.deepEqual(stats[0].nick, "阿明");
+  assert.equal(stats[0].games, 2); // 同昵称两名真人座位各计一局
+  assert.equal(stats[0].wins, 1);
+  assert.equal(stats[0].rate, 0.5);
+  assert.equal(stats[0].roles.wolfking, 1);
 });
 
 /* ---------- 8. 日志按天折叠：groupLogEvents 分组纯函数（2026-10-05 试玩反馈） ---------- */

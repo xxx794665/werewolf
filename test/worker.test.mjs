@@ -17,6 +17,7 @@ import assert from 'node:assert/strict';
 import { checkUrl } from '../worker/src/url-guard.js';
 import * as logic from '../worker/src/room-logic.js';
 import * as game from '../shared/game.js';
+import * as ai from '../js/ai.js'; // ADR-0004 双解析器成对断言用（js/ai.js 客户端份）
 import { PERSONAS } from '../shared/prompts.js';
 import { buildProxyRequest, proxyFetch, aiProxyLimited, resetRateLimiterForTests, isDefaultAiUrl, DEFAULT_AI_BASE } from '../worker/src/ai-proxy.js';
 import worker, { resetRoomLimiterForTests } from '../worker/src/index.js';
@@ -370,14 +371,27 @@ test('托管与行动超时（§7.7 / §5.11）：60s 无心跳转托管；150s 
   if (!actor.isAI) assert.ok(timed.room.hosted.includes(pending), '超时真人转托管');
 });
 
-test('房主失联 30 分钟 → 房间作废只读（§7.7）；单机真人不超时', () => {
+test('全员失联 30 分钟 → 房间作废只读（§4.1 作废口径修订，ADR-0016）；仅房主失联不作废；单机真人不超时', () => {
   const { room } = newGame();
+  /* 真实时间基：房间建于 T0、动作发生在 T0+100，现在走到开局后 40 分钟；
+     latestHumanSeen 以 createdAt 为下界（不可能出现早于建房的心跳） */
+  const NOW = T0 + 40 * 60_000;
+  // 反例（新口径）：房主 35 分钟前最后一次心跳，但乙丙心跳新鲜 → 不作废（闹钟接管继续）
+  const partial = structuredClone(room);
+  partial.heartbeats['u1'] = T0 + 5 * 60_000;
+  partial.ownerOnline = false;
+  partial.heartbeats['u2'] = NOW - 3_000;
+  partial.heartbeats['u3'] = NOW - 3_000;
+  const kept = logic.sweep(partial, NOW);
+  assert.equal(kept.room.abandoned, false, '他人仍在线 → 不作废（§4.1 全员失联口径）');
+  // 正例：全部真人 35 分钟前最后一次心跳 → 作废
   const stale = structuredClone(room);
-  stale.heartbeats['u1'] = T0 + 100 - 31 * 60_000;
-  const gone = logic.sweep(stale, T0 + 100);
-  assert.ok(gone.room.abandoned, '房主失联超 30 分钟房间作废');
+  for (const uid of ['u1', 'u2', 'u3']) stale.heartbeats[uid] = T0 + 5 * 60_000;
+  stale.ownerOnline = false;
+  const gone = logic.sweep(stale, NOW);
+  assert.ok(gone.room.abandoned, '全员失联超 30 分钟房间作废');
   assert.ok(logic.snapshotFor(gone.room, 1).abandoned, '快照显示作废');
-  const rejected = logic.applyAction(gone.room, 'speak', { uid: 'u1', text: 'x' }, { now: T0 + 100 });
+  const rejected = logic.applyAction(gone.room, 'speak', { uid: 'u1', text: 'x' }, { now: NOW });
   assert.ok(rejected.error, '作废后拒绝一切动作');
 
   // 单机（1 真人 + 8 AI 的私密房间）：不设行动超时、不掉线作废（§5.11 / §6）
@@ -419,11 +433,123 @@ test('心跳不抬 rev；托管座位重连（uid 心跳）即收回控制权；
   assert.ok(gone.changed, '房主在线状态翻转');
   const s = logic.snapshotFor(gone.room, 2);
   assert.equal(s.ownerOnline, false);
+  assert.equal('waitingOwner' in s, false, '旧字段 waitingOwner 已废止（§4.2 更名）');
   const pending = game.pendingSeat(gone.room.game);
   const pendingPlayer = gone.room.game.players[pending - 1];
   if (pendingPlayer && (pendingPlayer.isAI || gone.room.hosted.includes(pending))) {
-    assert.equal(s.waitingOwner, true, 'AI 待行动且房主掉线 → 显示等待房主');
+    assert.equal(s.serverDrive, true, 'AI/托管待行动且房主掉线 → serverDrive=true（服务端已接管）');
+  } else {
+    assert.equal(s.serverDrive, undefined, '真人待行动 → 不显示接管（等真人自己行动）');
   }
+});
+
+/* ---------------- 闹钟接管（§4.1，ADR-0016） ---------------- */
+
+test('alarmDriveDue 条件矩阵（§4.1 纯函数直测）：phase × 人数 × 房主心跳 × 待行动座位', () => {
+  const { room } = newGame();
+  const now = T0 + 200;
+  const pend = game.pendingSeat(room.game);
+  assert.ok(pend != null, '夜 1 狼阶段应有待行动座位');
+  const variant = (mutate) => {
+    const r = structuredClone(room);
+    mutate(r);
+    return r;
+  };
+  /* ① 房主在线（心跳新鲜）→ 不接管：客户端 4s 兜底节拍照常驱动 */
+  assert.equal(
+    logic.alarmDriveDue(variant((r) => { r.game.players[pend - 1].isAI = true; r.heartbeats['u1'] = now - 1_000; }), now),
+    false,
+    '房主在线 → 不接管'
+  );
+  /* ② 房主掉线（>35s 窗口）+ 待行动 AI → 接管 */
+  assert.equal(
+    logic.alarmDriveDue(
+      variant((r) => { r.game.players[pend - 1].isAI = true; r.heartbeats['u1'] = now - 40_000; r.ownerOnline = false; }),
+      now
+    ),
+    true,
+    '房主掉线 + AI 待行动 → 接管'
+  );
+  /* ③ 待行动托管真人 → 接管（房主可代打，闹钟同款驱动） */
+  assert.equal(
+    logic.alarmDriveDue(
+      variant((r) => { r.game.players[pend - 1].isAI = false; r.hosted.push(pend); r.heartbeats['u1'] = now - 40_000; r.ownerOnline = false; }),
+      now
+    ),
+    true,
+    '托管座位待行动 → 接管'
+  );
+  /* ④ 待行动普通真人 → 不接管（等真人自己行动） */
+  assert.equal(
+    logic.alarmDriveDue(
+      variant((r) => { r.game.players[pend - 1].isAI = false; r.heartbeats['u1'] = now - 40_000; r.ownerOnline = false; }),
+      now
+    ),
+    false,
+    '真人待行动 → 不接管'
+  );
+  /* ⑤ 单机（真人 ≤1）→ 不接管：客户端 soloDrive 自己驱动 */
+  assert.equal(
+    logic.alarmDriveDue(
+      variant((r) => {
+        r.game.players.forEach((p) => { if (p && !p.isAI && p.uid !== 'u1') p.isAI = true; });
+        r.game.players[pend - 1].isAI = true;
+        r.heartbeats['u1'] = now - 40_000;
+        r.ownerOnline = false;
+      }),
+      now
+    ),
+    false,
+    '单机不接管'
+  );
+  /* ⑥ 房主心跳缺键 → 回退房创建时刻判定（不落 NaN 恒 false 的坑，触点 D-2①） */
+  assert.equal(
+    logic.alarmDriveDue(variant((r) => { r.game.players[pend - 1].isAI = true; delete r.heartbeats['u1']; }), now),
+    true,
+    '缺心跳键按掉线处理（createdAt 距今已超 35s 窗口）'
+  );
+  /* ⑦ 非对局阶段 / 作废房 → 不接管（applyGameAction 不查 abandoned，闸门在此拦） */
+  assert.equal(
+    logic.alarmDriveDue(variant((r) => { r.game.phase = 'lobby'; }), now),
+    false,
+    'lobby 不接管'
+  );
+  assert.equal(
+    logic.alarmDriveDue(
+      variant((r) => { r.abandoned = true; r.game.players[pend - 1].isAI = true; r.heartbeats['u1'] = now - 40_000; }),
+      now
+    ),
+    false,
+    '作废房不接管'
+  );
+  assert.equal(logic.AI_DRIVE_CADENCE_MS, 5_000, '§4.1 节拍常量导出');
+});
+
+test('nextAlarmAt：接管时推 now+5s 节拍；防热循环——房主失联>30min 但他人有心跳 → 下一 alarm 在未来（裁定 8）', () => {
+  const { room } = newGame();
+  const now = T0 + 100;
+  /* 接管条件成立 → 5s 节拍是最近的 alarm 分量（deadline 150s / 托管 60s / 作废 30min 都更远） */
+  const off = structuredClone(room);
+  off.heartbeats['u1'] = now - 40_000;
+  off.ownerOnline = false;
+  off.game.players[game.pendingSeat(off.game) - 1].isAI = true; // 白盒：待行动改 AI
+  assert.ok(logic.alarmDriveDue(off, now), '接管条件成立');
+  assert.equal(logic.nextAlarmAt(off, now), now + logic.AI_DRIVE_CADENCE_MS, '节拍分量 now+5s 排程');
+
+  /* 防热循环（裁定 8）：房主失联 31 分钟但乙丙心跳新鲜——作废分量连根改
+   * latestHumanSeen 后不得算出过去时刻被钳成 1ms 毫秒级热循环；
+   * 现实链路里第一拍 sweep 已把失联房主转托管，按该状态断言 */
+  const hot = structuredClone(room);
+  hot.heartbeats['u1'] = now - 31 * 60_000;
+  hot.heartbeats['u2'] = now - 3_000;
+  hot.heartbeats['u3'] = now - 3_000;
+  hot.ownerOnline = false;
+  hot.game.players[game.pendingSeat(hot.game) - 1].isAI = true;
+  const swept = logic.sweep(hot, now);
+  assert.equal(swept.room.abandoned, false, '他人心跳新鲜 → 不作废（闹钟接管继续，§4.1 口径）');
+  const t = logic.nextAlarmAt(swept.room, now);
+  assert.ok(t >= now + logic.AI_DRIVE_CADENCE_MS, `下一 alarm 必须在未来（实际 +${t - now}ms，不得钳成 now+1）`);
+  assert.equal(t, now + logic.AI_DRIVE_CADENCE_MS, '接管节拍仍是最近分量（房主回归即自然停）');
 });
 
 test('AI 契约：buildAIRequest 组装 §5.0 请求体，女巫 roleCard 含当夜刀口', () => {
@@ -501,6 +627,91 @@ test('parseWolfReply（§4.1.1 两行格式）：首行密聊、余行投票；�
   assert.deepEqual(logic.parseWolfReply('「刀 3 号」\n投 3'), { chat: '刀 3 号', target: 3 }, '剥引号');
   assert.deepEqual(logic.parseWolfReply(''), { chat: null, target: null });
   assert.deepEqual(logic.parseWolfReply(null), { chat: null, target: null });
+});
+
+/* ---------------- 双解析器与路由扩展（§1.5 / §2.6，ADR-0004 成对断言） ---------------- */
+
+test('phaseOf 新 subPhase 映射：room-logic 与 js/ai.js 两份逐点同口径（ADR-0004）', () => {
+  const CASES = [
+    ['night:wolf', 'wolf'],
+    ['night:guard', 'guard'], // §1.3（ADR-0013）
+    ['night:seer', 'seer'],
+    ['night:witch', 'witch'],
+    ['day:night_hunter', 'hunter'],
+    ['day:hunter', 'hunter'],
+    ['day:lastwords', 'lastwords'],
+    ['day:exile_lastwords', 'lastwords'],
+    ['day:elect_join', 'elect_join'], // §2.6（ADR-0014）
+    ['day:elect_withdraw', 'elect_withdraw'],
+    ['day:elect_campaign', 'elect_campaign'],
+    ['day:elect_pk_speak', 'elect_pk_speak'], // 裁定 6
+    ['day:elect_vote', 'elect_vote'],
+    ['day:elect_pk_vote', 'elect_vote'], // §2.6：PK 轮同警长票
+    ['day:badge', 'badge'],
+    ['day:speak', 'speak'],
+    ['day:pk_speak', 'pk_speak'],
+    ['day:vote', 'vote'],
+    ['day:pk_vote', 'pk_vote'],
+  ];
+  for (const [key, want] of CASES) {
+    const [phase, subPhase] = key.split(':');
+    const g = { phase, subPhase };
+    assert.equal(logic.phaseOf(g), want, `room-logic.phaseOf(${key})`);
+    assert.equal(ai.phaseOf(g), want, `js/ai.js phaseOf(${key})`);
+  }
+  assert.equal(logic.phaseOf({ phase: 'lobby', subPhase: null }), null);
+  assert.equal(ai.phaseOf({ phase: 'lobby', subPhase: null }), null);
+});
+
+test('parseAIReply / parseReply 竞选与守卫分支：二选一关键字先于通用 skip/pass（B3-1）；两份同口径', () => {
+  const PAIRED = [
+    ['elect_join', 'Run。', { type: 'elect_run', run: true }],
+    ['elect_join', 'pass', { type: 'elect_run', run: false }], // pass=不上警（先于通用 pass=skip 判定）
+    ['elect_join', '我再想想', null], // 非整串关键字 → 解析失败走回退
+    ['elect_withdraw', 'QUIT', { type: 'elect_withdraw', quit: true }],
+    ['elect_withdraw', 'stay', { type: 'elect_withdraw', quit: false }],
+    ['elect_vote', 'skip', { type: 'elect_vote', target: null }], // 弃票
+    ['elect_vote', '5号，可信', { type: 'elect_vote', target: 5 }],
+    ['badge', 'skip', { type: 'badge_move', target: null }], // skip = 撕毁警徽（§2.6）
+    ['badge', '3', { type: 'badge_move', target: 3 }],
+    ['guard', '6', { type: 'guard_protect', target: 6 }], // §1.3（ADR-0013）
+    ['guard', 'skip', null], // 守卫不可跳过
+  ];
+  for (const [phase, text, want] of PAIRED) {
+    assert.deepEqual(logic.parseAIReply(phase, text), want, `room-logic.parseAIReply(${phase}, ${text})`);
+    assert.deepEqual(ai.parseReply(phase, text), want, `js/ai.js parseReply(${phase}, ${text})`);
+  }
+  // 裁定 5：竞选发言三元组同步扩——动作走 elect_speak（内核 hElectSpeak 队列，非 speak）
+  for (const phase of ['elect_campaign', 'elect_pk_speak']) {
+    assert.equal(logic.parseAIReply(phase, '请大家投我一票，我给大家带队。').type, 'elect_speak');
+    assert.equal(ai.parseReply(phase, '请大家投我一票，我给大家带队。').type, 'elect_speak');
+    assert.equal(logic.parseAIReply(phase, '   '), null);
+    assert.equal(ai.parseReply(phase, '   '), null);
+  }
+  // 既有 pass 语义不被波及（vote 弃票 / 验人不可 skip / 猎人放弃开枪）
+  assert.deepEqual(logic.parseAIReply('vote', 'pass'), { type: 'vote', target: null });
+  assert.deepEqual(ai.parseReply('vote', 'pass'), { type: 'vote', target: null });
+  assert.equal(logic.parseAIReply('seer', 'pass'), null);
+  assert.equal(ai.parseReply('seer', 'pass'), null);
+  assert.deepEqual(logic.parseAIReply('hunter', 'skip'), { type: 'hunter_shoot', target: null });
+});
+
+test('GAME_ACTIONS 新路由 smoke：guard/elect/badge kebab-case 路由可达内核（错误阶段由内核拒绝）', () => {
+  const { room } = newGame();
+  const ROUTES = [
+    ['guard-protect', { target: 2 }],
+    ['elect-run', { run: true }],
+    ['elect-speak', { text: 'x' }],
+    ['elect-withdraw', { quit: true }],
+    ['elect-vote', { target: 2 }],
+    ['badge-move', { target: 2 }],
+  ];
+  for (const [action, extra] of ROUTES) {
+    // 夜 1 狼阶段调用：路由必须通到内核（返回内核校验错误而非「未知动作」）
+    const out = logic.applyAction(room, action, { uid: room.ownerUid, ...extra }, { now: T0, seed: 42 });
+    assert.ok(out.error, `${action} 夜 1 应被拒`);
+    assert.notEqual(out.error, `未知动作：${action}`, `${action} 路由必须存在（三道门一致，A3-9）`);
+  }
 });
 
 test('死亡亮牌时机（§7.8 修订）：遗言提交前只见自己身份，提交后观战见全员；终局全亮', () => {
@@ -651,6 +862,109 @@ test('drive_ai 狼阶段（§4.1.1）：一次调用提交密聊 + 投票两段�
     assert.equal(r4.via, 'ai', '格式不合格重试后合法');
     assert.equal(step, 2, '格式不合格恰好重试 1 次');
     assert.equal(room.room.game.seerChecks.length, 1, '预言家验人入账');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('闹钟接管 autoDrive（§4.1，ADR-0016）：体验通道 + Secret 注入、单次尝试、失败不回退、与 driving 互斥', async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    class AlarmStore {
+      constructor() {
+        this.map = new Map();
+        this.alarmAt = null;
+      }
+      async get(k) {
+        return this.map.get(k);
+      }
+      async put(k, v) {
+        this.map.set(k, v);
+      }
+      async delete(k) {
+        this.map.delete(k);
+      }
+      async setAlarm(t) {
+        this.alarmAt = t;
+      }
+      async deleteAlarm() {
+        this.alarmAt = null;
+      }
+    }
+    const seen = [];
+    const stub = (content) => async () => {
+      seen.push(null);
+      if (content === null) throw new Error('down');
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const capture = [];
+    globalThis.fetch = async (url, init) => {
+      capture.push({ url: String(url), auth: init.headers.authorization, body: JSON.parse(init.body) });
+      seen.push(null);
+      return new Response(JSON.stringify({ choices: [{ message: { content: '3' } }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    const shell = new Room({ storage: new AlarmStore() }, { DEFAULT_AI_KEY: 'test-secret' });
+    const rpc = async (action, body, q = '') => {
+      const res = await shell.fetch(
+        new Request(`https://do/?action=${action}${q}`, body ? { method: 'POST', body: JSON.stringify(body) } : undefined)
+      );
+      return res.json();
+    };
+    await rpc('new', { nick: '甲', uid: 'o1' }, '&code=AUTO01');
+    await rpc('join', { nick: '乙', uid: 'o2' });
+    await rpc('join', { nick: '丙', uid: 'o3' });
+    for (const u of ['o1', 'o2', 'o3']) await rpc('ready', { uid: u, ready: true });
+    await rpc('start', { uid: 'o1' });
+    /* 白盒调牌（与 drive_ai 桩同款）：真人全平民、AI 前三狼 → 狼阶段待行动恒为 AI 座位 */
+    const AI_ROLES = ['werewolf', 'werewolf', 'werewolf', 'seer', 'witch', 'hunter'];
+    shell.room.game.players.forEach((p) => {
+      if (p) p.role = p.isAI ? AI_ROLES.shift() : 'villager';
+    });
+    /* 房主掉线（>35s 窗口）→ 闹钟接管条件成立 */
+    shell.room.heartbeats['o1'] = Date.now() - 40_000;
+    shell.room.ownerOnline = false;
+    const pending = game.pendingSeat(shell.room.game);
+    assert.ok(shell.room.game.players[pending - 1].isAI, '白盒：待行动座位应为 AI');
+    assert.equal(logic.alarmDriveDue(shell.room, Date.now()), true, '接管条件成立');
+
+    /* ① alarm → sweep → autoDrive：成功一拍恰好一次出站，走体验通道 + Secret 注入 */
+    await shell.alarm();
+    assert.equal(seen.length, 1, '单次尝试（成功即一拍一次出站）');
+    assert.equal(capture.length, 1);
+    const call = capture[0];
+    assert.ok(call.url.startsWith('https://api.cline.bot/api/v1/'), '走体验通道 DEFAULT_AI_BASE');
+    assert.equal(call.body.model, 'cline-pass/deepseek-v4.1-flash', '体验通道模型（§4.1）');
+    assert.equal(call.auth, 'Bearer test-secret', 'env.DEFAULT_AI_KEY 注入（与 ai-proxy 同口径）');
+    assert.ok(call.body.max_tokens > 0, '出站带输出预算');
+    assert.equal(shell.room.game.night.wolfVotes[pending], 3, '接管驱动投票入账');
+
+    /* ② 失败不立即回退：上游不可达 → 状态不动（无回退投票），下拍重试；
+       150s deadline sweep 仍是最终兜底（§4.1） */
+    const before = Object.keys(shell.room.game.night.wolfVotes).length;
+    globalThis.fetch = stub(null);
+    seen.length = 0;
+    await shell.alarm();
+    assert.equal(seen.length, 1, '失败同样只发一次请求（单次 25s）');
+    assert.equal(Object.keys(shell.room.game.night.wolfVotes).length, before, '失败不立即回退');
+
+    /* ③ 与 this.driving 互斥：出站期间（模拟 drive_ai 占线）闹钟到点 → 本拍让位 */
+    shell.driving = true;
+    seen.length = 0;
+    await shell.alarm();
+    assert.equal(seen.length, 0, 'driving 占线 → 闹钟本拍跳过（HTTP drive_ai 优先）');
+    shell.driving = false;
+
+    /* ④ alarm 收尾基于 autoDrive 之后的最新房间重排：接管仍生效 → alarmAt ≈ now+5s，
+       绝不排进过去（D-8 顺序陷阱） */
+    const now = Date.now();
+    assert.ok(shell.ctx.storage.alarmAt >= now, `alarm 排在未来（实际 ${shell.ctx.storage.alarmAt - now}ms）`);
+    assert.ok(shell.ctx.storage.alarmAt <= now + logic.AI_DRIVE_CADENCE_MS + 2_000, '下一拍在 5s 节拍附近');
   } finally {
     globalThis.fetch = realFetch;
   }
@@ -952,6 +1266,325 @@ test('体验通道：默认上游且无 key → 注入 Secret；自带 key 原�
   assert.equal(seen[0].auth, 'Bearer test-injected-key', '无 key + 默认上游 → 注入 Secret');
   assert.equal(seen[1].auth, 'Bearer mine', '自带 key 原样透传，不覆盖');
   assert.equal(seen[2].auth, null, '他域永不注入，Bearer 不外带');
+});
+
+/* ---------------- toHistory / roleCardOf / windowHistory 双解析器同 fixture 对照（ADR-0004 成对断言扩展） ---------------- */
+
+/** newGame 的带板子变体（§1.1，ADR-0013）：start 动作 ctx 带 board；缺省 standard。 */
+function newGameBoard(board) {
+  let room = logic.createRoom('ABC234', { nick: '甲', uid: 'u1' }, T0).room;
+  const act = (a, b, now) => {
+    const out = logic.applyAction(room, a, b, { now: now ?? T0, seed: 42, ...(board !== undefined ? { board } : null) });
+    assert.ok(!out.error, `${a} 不应失败：${out.error}`);
+    room = out.room;
+    return out;
+  };
+  act('join', { nick: '乙', uid: 'u2' });
+  act('join', { nick: '丙', uid: 'u3' });
+  act('ready', { uid: 'u1', ready: true });
+  act('ready', { uid: 'u2', ready: true });
+  act('ready', { uid: 'u3', ready: true });
+  act('start', { uid: 'u1' }, T0 + 100);
+  return { room, act };
+}
+
+/** 双侧同 fixture 对照步：内核纯函数干跑取原始事件 → ai.toHistory；room 侧经 applyGameAction
+ *  真实入账取 log 增量（内部走 room-logic 份 toHistory，未导出，只能经此触达）。
+ *  两份解析器对同一批内核事件必须产出逐行一致的 history（ADR-0004；漏接新事件在此暴露）。 */
+function pairedStep(room, gameAction, now) {
+  const dry = game.advance(room.game, gameAction);
+  assert.equal(dry.error, null, `干跑 ${gameAction.type} 不应失败：${dry.error}`);
+  const out = logic.applyGameAction(room, gameAction, now);
+  assert.ok(!out.error, `入账 ${gameAction.type} 不应失败：${out.error}`); // 成功路径无 error 键
+  const delta = out.room.log.slice(room.log.length);
+  assert.deepEqual(delta, ai.toHistory(dry.events), `${gameAction.type}@seat=${gameAction.seat} 两份 toHistory 不一致`);
+  return out.room;
+}
+
+/** 双侧对照的确定性回退步（applyFallbackFor ↔ game.applyFallback，同口径）。 */
+function pairedFallback(room, now) {
+  const seat = game.pendingSeat(room.game);
+  assert.notEqual(seat, null, '对局中应有待行动座位');
+  const dry = game.applyFallback(room.game, seat);
+  assert.equal(dry.error, null, `干跑回退不应失败：${dry.error}`);
+  const out = logic.applyFallbackFor(room, seat, now);
+  assert.ok(!out.error, `回退入账不应失败：${out.error}`); // 成功路径无 error 键
+  const delta = out.room.log.slice(room.log.length);
+  assert.deepEqual(delta, ai.toHistory(dry.events), `回退@${seat}/${room.game.subPhase} 两份 toHistory 不一致`);
+  return out.room;
+}
+
+/** 双侧对照的全回退驱动整局（收敛到 revealed）。 */
+function pairedDriveToRevealed(room, now) {
+  let cur = room;
+  let n = 0;
+  const subPhases = new Set();
+  while (cur.game.phase !== 'revealed' && n++ < 500) {
+    subPhases.add(`${cur.game.phase}:${cur.game.subPhase}`);
+    cur = pairedFallback(cur, now + n);
+  }
+  assert.equal(cur.game.phase, 'revealed', '整局必须收敛');
+  return { room: cur, subPhases };
+}
+
+test('toHistory 双解析器同 fixture 对照（ADR-0004）：全回退驱动整局 log 增量 ≡ ai.toHistory(内核事件)', () => {
+  const { room } = newGame();
+  const { room: end, subPhases } = pairedDriveToRevealed(room, T0 + 200);
+  assert.ok(end.log.length > 10, '整局 log 非空');
+  assert.ok(subPhases.has('day:elect_join'), 'day 1 竞选被整局走到（elect_run 事件经两份解析器）');
+  const kinds = end.log.filter((e) => e.t === 'sheriff').map((e) => e.kind);
+  assert.ok(kinds.includes('none'), '回退竞选（全员不上警）→ sheriff 行 kind=none 两份一致入账');
+  // 双份 windowHistory 同源一致（room.log 即 AI 历史窗口数据源）
+  assert.deepEqual(logic.windowHistory(end.log), ai.windowHistory(end.log));
+});
+
+test('toHistory 双解析器同 fixture 对照（ADR-0004）：白痴板真实放逐——exile 行 idiot 标记两份一致', () => {
+  const { room } = newGameBoard('idiot');
+  const id = room.game.players.find((p) => p && p.role === 'idiot').seat;
+  let cur = room;
+  let n = 0;
+  const now = () => T0 + 1000 + n++ * 10;
+  // N1：狼刀平民 → 预言家验人 → 女巫过（全程双侧对照）
+  const wolves = cur.game.players.filter((p) => p && game.isWolf(p.role)).map((p) => p.seat);
+  const victim = cur.game.players.find((p) => p && !game.isWolf(p.role) && p.seat !== id).seat;
+  for (const w of wolves) cur = pairedStep(cur, { type: 'wolf_target', seat: w, target: victim }, now());
+  cur = pairedStep(cur, { type: 'seer_check', seat: seatOfRole(cur, 'seer'), target: victim === seatOfRole(cur, 'seer') ? id : victim }, now());
+  cur = pairedStep(cur, { type: 'witch_move', seat: seatOfRole(cur, 'witch'), move: 'skip' }, now());
+  // D1：竞选与发言回退 → 停在 vote（省去逐发言对照，回退事件同样过两份解析器）
+  while (['lastwords', 'elect_join', 'speak'].includes(cur.game.subPhase)) cur = pairedFallback(cur, now());
+  assert.equal(cur.game.subPhase, 'vote');
+  // 全员票投白痴 → 放逐翻牌：vote_result.idiot → exile{idiot:true} 行两份一致
+  const votes = {};
+  for (const p of cur.game.players) if (p.alive) votes[p.seat] = p.seat === id ? null : id;
+  for (const [seat, target] of Object.entries(votes)) {
+    cur = pairedStep(cur, { type: 'vote', seat: Number(seat), target }, now());
+  }
+  const delta = cur.log.slice(room.log.length);
+  assert.ok(delta.some((e) => e.t === 'exile' && e.seat === id && e.idiot === true), 'log 增量含翻牌白痴行（idiot 标记）');
+  assert.equal(cur.game.players[id - 1].alive, true, '白痴免死入账');
+  // 余局全回退驱动收敛（含后续天数全部事件的两份对照）
+  pairedDriveToRevealed(cur, T0 + 5000);
+});
+
+test('toHistory 双解析器同 fixture 对照（ADR-0004）：警长竞选全流程 / 警徽移交与撕毁 / 狼王翻牌 role——剧本对局逐事件一致', () => {
+  const { room } = newGameBoard('wolfking');
+  const wk = room.game.players.find((p) => p && p.role === 'wolfking').seat;
+  const wolves = room.game.players.filter((p) => p && game.isWolf(p.role)).map((p) => p.seat);
+  const good = room.game.players.filter((p) => p && !game.isWolf(p.role)).map((p) => p.seat);
+  let cur = room;
+  let n = 0;
+  const now = () => T0 + 10_000 + n++ * 10;
+  // N1：狼队刀一个好人（狼王同投；标准夜顺序无守卫板位）
+  for (const w of wolves) cur = pairedStep(cur, { type: 'wolf_target', seat: w, target: good[0] }, now());
+  cur = pairedStep(cur, { type: 'seer_check', seat: seatOfRole(cur, 'seer'), target: good[1] === seatOfRole(cur, 'seer') ? good[2] : good[1] }, now());
+  cur = pairedStep(cur, { type: 'witch_move', seat: seatOfRole(cur, 'witch'), move: 'skip' }, now());
+  // 首夜死者遗言回退 → 天亮进竞选（day 1 lastwords 在 elect_join 之前）
+  if (cur.game.subPhase === 'lastwords') cur = pairedFallback(cur, now());
+  // D1 竞选：狼王 + 一个好人上警 → 竞选发言 → 全留台 → 投票平票 → PK 发言 → PK 重投狼王当选
+  const goodB = good[1] === wk ? good[2] : good[1];
+  const candidates = [wk, goodB].sort((x, y) => x - y);
+  for (let seat = 1; seat <= 9; seat++) {
+    if (!cur.game.players[seat - 1].alive) continue;
+    cur = pairedStep(cur, { type: 'elect_run', seat, run: candidates.includes(seat) }, now());
+  }
+  for (const c of candidates) cur = pairedStep(cur, { type: 'elect_speak', seat: c, text: '我经验足，选我带队。' }, now());
+  for (const c of candidates) cur = pairedStep(cur, { type: 'elect_withdraw', seat: c, quit: false }, now());
+  const electVoters = cur.game.players.filter((p) => p && p.alive && !candidates.includes(p.seat)).map((p) => p.seat);
+  assert.equal(electVoters.length, 6, '8 活 - 2 候选 = 6 投票人（平票可行）');
+  for (let i = 0; i < electVoters.length; i++) {
+    cur = pairedStep(cur, { type: 'elect_vote', seat: electVoters[i], target: i % 2 === 0 ? wk : goodB }, now());
+  }
+  let delta = cur.log.slice(room.log.length);
+  assert.ok(delta.some((e) => e.t === 'sheriff' && e.kind === 'tie-pk' && Array.isArray(e.pk)), '竞选平票 → tie-pk 行带 PK 名单');
+  for (const c of candidates) cur = pairedStep(cur, { type: 'elect_speak', seat: c, text: 'PK 自辩：我真的可以。' }, now());
+  for (let i = 0; i < electVoters.length; i++) {
+    cur = pairedStep(cur, { type: 'elect_vote', seat: electVoters[i], target: i < 4 ? wk : goodB }, now());
+  }
+  delta = cur.log.slice(room.log.length);
+  assert.ok(delta.some((e) => e.t === 'sheriff' && e.kind === 'elected' && e.seat === wk), '狼王 PK 决出当选');
+  assert.equal(cur.game.sheriff.seat, wk);
+  // 发言回退 → 全员票放逐警长（狼王本人）→ 遗言回退 → 警徽闸口②：移交警徽
+  while (cur.game.subPhase === 'speak') cur = pairedFallback(cur, now());
+  assert.equal(cur.game.subPhase, 'vote');
+  for (const p of cur.game.players) {
+    if (p.alive) cur = pairedStep(cur, { type: 'vote', seat: p.seat, target: wk }, now());
+  }
+  assert.equal(cur.game.subPhase, 'exile_lastwords', '被放逐警长先遗言');
+  cur = pairedFallback(cur, now()); // 狼王遗言回退
+  assert.equal(cur.game.subPhase, 'badge', '闸口②：遗言后、翻牌前进警徽处置（裁定 7）');
+  const heir = goodB; // 接任警徽（PK 落选但出局不死亡，存活可接）
+  cur = pairedStep(cur, { type: 'badge_move', seat: wk, target: heir }, now());
+  delta = cur.log.slice(room.log.length);
+  assert.ok(delta.some((e) => e.t === 'sheriff' && e.kind === 'transfer' && e.from === wk && e.to === heir), 'badge_move 并入 sheriff 行 kind=transfer');
+  assert.equal(cur.game.sheriff.seat, heir);
+  assert.equal(cur.game.subPhase, 'hunter', '警徽处置后重走狼王翻牌判定（§1.2 仅放逐时翻牌）');
+  const shot = good.find((s) => s !== heir && s !== good[0] && cur.game.players[s - 1].alive);
+  cur = pairedStep(cur, { type: 'hunter_shoot', seat: wk, target: shot }, now());
+  delta = cur.log.slice(room.log.length);
+  assert.ok(delta.some((e) => e.t === 'hunter' && e.seat === wk && e.target === shot && e.role === 'wolfking'), '狼王翻牌 role 字段两份一致');
+  // N2：狼队刀新警长 → 闸口①：撕毁警徽 → 余局收敛（预言家 / 女巫可能已死，子阶段按内核跳过逻辑条件推进）
+  for (const w of wolves) {
+    if (cur.game.players[w - 1].alive && cur.game.subPhase === 'wolf') {
+      cur = pairedStep(cur, { type: 'wolf_target', seat: w, target: heir }, now());
+    }
+  }
+  if (cur.game.subPhase === 'seer') {
+    cur = pairedStep(cur, { type: 'seer_check', seat: seatOfRole(cur, 'seer'), target: wk === seatOfRole(cur, 'seer') ? heir : wk }, now());
+  }
+  if (cur.game.subPhase === 'witch') cur = pairedStep(cur, { type: 'witch_move', seat: seatOfRole(cur, 'witch'), move: 'skip' }, now());
+  assert.equal(cur.game.subPhase, 'badge', '夜死警长 → 白天闸口①拦截');
+  cur = pairedStep(cur, { type: 'badge_move', seat: heir, target: null }, now());
+  delta = cur.log.slice(room.log.length);
+  assert.ok(delta.some((e) => e.t === 'sheriff' && e.kind === 'destroy' && e.from === heir), '撕毁警徽 → sheriff 行 kind=destroy（无 to）');
+  assert.equal(cur.game.sheriff.seat, null);
+  pairedDriveToRevealed(cur, T0 + 50_000);
+});
+
+test('toHistory 双解析器同 fixture 对照（ADR-0004）：全员上警 no-voters 分支（白盒 elect_withdraw 起步）', () => {
+  const { room } = newGame();
+  const g = structuredClone(room.game);
+  g.phase = 'day';
+  g.day = 1;
+  g.subPhase = 'elect_withdraw'; // 白盒：竞选已走到退水表态、候选 = 全体存活（§2.1 全员上警角落）
+  const alive = g.players.filter((p) => p && p.alive).map((p) => p.seat);
+  g.sheriff = { seat: null, election: { stage: 'withdraw', run: {}, candidates: alive, quit: {}, votes: null, queue: [], pkCandidates: [] } };
+  let cur = { ...room, game: g, log: [...room.log], revs: { ...room.revs } };
+  let n = 0;
+  for (const seat of alive) cur = pairedStep(cur, { type: 'elect_withdraw', seat, quit: false }, T0 + 2000 + n++ * 10);
+  const kinds = cur.log.slice(room.log.length).filter((e) => e.t === 'sheriff').map((e) => e.kind);
+  assert.ok(kinds.includes('no-voters'), '全员留台 → 无投票人 → no-voters（§2.1 简化口径）');
+  assert.equal(cur.game.subPhase, 'speak', '无警长结论后进白天发言');
+  assert.deepEqual(logic.windowHistory(cur.log), ai.windowHistory(cur.log));
+});
+
+test('roleCardOf 双份同 fixture 对照（ADR-0004）：四板逐座位 deepEqual（含 board/sheriff/election/guardLast 新字段）', () => {
+  for (const board of ['standard', 'wolfking', 'guard', 'idiot']) {
+    const { room } = newGameBoard(board);
+    for (let seat = 1; seat <= 9; seat++) {
+      assert.deepEqual(logic.roleCardOf(room.game, seat), ai.roleCardOf(room.game, seat), `${board} 板座位 ${seat} 身份卡两份不一致`);
+    }
+  }
+  // 竞选中 + 警长已定：公开层字段（裁定 9/11）两份同形
+  const g = structuredClone(newGameBoard('wolfking').room.game);
+  g.phase = 'day';
+  g.subPhase = 'elect_vote';
+  g.sheriff = { seat: 4, election: { stage: 'vote', run: {}, candidates: [2, 3], quit: {}, votes: { cast: {} }, queue: [], pkCandidates: [2, 3] } };
+  for (let seat = 1; seat <= 9; seat++) {
+    assert.deepEqual(logic.roleCardOf(g, seat), ai.roleCardOf(g, seat), `竞选中座位 ${seat} 身份卡两份不一致`);
+    const card = ai.roleCardOf(g, seat);
+    assert.equal(card.sheriff, 4, '警长座位公开进卡（裁定 9）');
+    assert.deepEqual(card.election, { candidates: [2, 3], pk: [2, 3] }, '竞选候选与 PK 台公开进卡（裁定 11）');
+  }
+});
+
+test('windowHistory / parseWolfReply 双解析器同 fixture 对照（ADR-0004）：digest 摘要行含白痴 / 狼王 / 警长（裁定 9②）', () => {
+  /* 五天 t-schema fixture：day 1–2 压 digest（maxDay=5 → 最近 2 个完整白天 + 当前天全量），
+     覆盖本批新增摘要行：翻牌白痴免死不计 dead、狼王带走计 dead、警长当选 / 移交 / 撕毁行 */
+  const LOG = [
+    { t: 'deaths', day: 1, seats: [9] },
+    { t: 'elect_run', day: 1, seat: 2, run: true }, // elect_* 压缩丢弃（竞选仅 day 1，裁定 9 口径）
+    { t: 'elect_speech', day: 1, seat: 2, text: '带 legit 队' },
+    { t: 'elect_vote', day: 1, voter: 4, target: 2 },
+    { t: 'sheriff', day: 1, kind: 'elected', seat: 2 },
+    { t: 'speech', day: 1, seat: 3, text: '第 1 天发言' },
+    { t: 'vote', day: 1, voter: 3, target: 7 },
+    { t: 'exile', day: 1, seat: 7, idiot: true },
+    { t: 'hunter', day: 1, seat: 7, target: 5, role: 'wolfking' },
+    { t: 'deaths', day: 2, seats: [] },
+    { t: 'sheriff', day: 2, kind: 'transfer', from: 2, to: 4 },
+    { t: 'sheriff', day: 2, kind: 'destroy', from: 4 },
+    { t: 'speech', day: 2, seat: 2, text: '第 2 天发言' },
+    { t: 'exile', day: 2, seat: null },
+    { t: 'deaths', day: 3, seats: [8] },
+    { t: 'speech', day: 3, seat: 1, text: '第 3 天发言' },
+    { t: 'vote', day: 3, voter: 1, target: 8 },
+    { t: 'deaths', day: 4, seats: [] },
+    { t: 'speech', day: 4, seat: 1, text: '第 4 天发言' },
+    { t: 'deaths', day: 5, seats: [] },
+    { t: 'speech', day: 5, seat: 1, text: '第 5 天发言' },
+  ];
+  // 双侧整体一致（windowHistory + digestOfDay 两份实现同 fixture 钉死）
+  assert.deepEqual(logic.windowHistory(LOG), ai.windowHistory(LOG));
+  // 摘要行文案与 dead 推导钉死（双侧一致后单侧断言即可）
+  const w = logic.windowHistory(LOG);
+  const d1 = w.find((e) => e.t === 'digest' && e.day === 1);
+  const d2 = w.find((e) => e.t === 'digest' && e.day === 2);
+  assert.ok(d1 && d2, '第 1、2 天被压缩');
+  assert.deepEqual(d1.dead, [5, 9], 'dead 完整：夜死 9 + 狼王带走 5；白痴翻牌 7 不得计入（存活推导依据）');
+  assert.ok(d1.text.includes('2 号当选警长'), '裁定 9②：警长当选摘要行');
+  assert.ok(d1.text.includes('7 号翻牌白痴，放逐无效'), '白痴免死摘要行（§1.4）');
+  assert.ok(d1.text.includes('狼王 7 号带走 5 号'), '狼王翻牌摘要行（§1.5）');
+  assert.deepEqual(d2.dead, [], '第 2 天平安日 dead 空');
+  assert.ok(d2.text.includes('警徽移交给 4 号'), '警徽移交摘要行');
+  assert.ok(d2.text.includes('警长撕毁警徽'), '警徽撕毁摘要行');
+  assert.ok(w.some((e) => e.t === 'speech' && e.day === 3), '第 3 天起全量保留');
+  // 同批文本 parseWolfReply 双侧一致（含 CRLF / 引号 / 多行无数字边界）
+  const WOLF_TEXTS = [
+    '听我口型，白天都别露馅。\n4',
+    '过\n7号',
+    '5',
+    '先压 4 号，都别暴露',
+    '「刀 3 号」\n投 3',
+    '多行没有数字\n第二段也没有\n9 号在最后一段',
+    '啊'.repeat(80) + '\n3',
+    '守 2 号\r\n5', // CRLF 行界
+    '',
+    null,
+  ];
+  for (const text of WOLF_TEXTS) {
+    assert.deepEqual(logic.parseWolfReply(text), ai.parseWolfReply(text), `parseWolfReply(${JSON.stringify(text && text.slice(0, 12))}) 两份不一致`);
+  }
+});
+
+/* ---------------- 旧态兼容（room-logic 份，部署过渡防回归，§10.3 旧局容错） ---------------- */
+
+test('旧态兼容：main 部署形状房间——快照 9 座位 / 巡检 / 闹钟接管 / 动作提交全不崩且不带新字段（部署过渡）', () => {
+  const { room } = newGame();
+  const legacy = structuredClone(room);
+  const g = legacy.game;
+  delete g.board;
+  delete g.seed;
+  delete g.guard;
+  delete g.sheriff;
+  delete g.badge;
+  delete g.night.guardTarget;
+  g.players.forEach((p) => { if (p) delete p.idiotRevealed; });
+  // 快照全座位：不崩，且旧房缺省不透本批新公开字段（board/sheriff/election/idiotRevealed）
+  for (let seat = 1; seat <= 9; seat++) {
+    const s = logic.snapshotFor(legacy, seat);
+    assert.equal('board' in s, false, `座位 ${seat} 旧房快照不带 board`);
+    assert.equal('sheriff' in s, false, `座位 ${seat} 旧房快照不带 sheriff`);
+    assert.equal('election' in s, false, `座位 ${seat} 旧房快照不带 election`);
+    assert.equal(s.players.some((p) => p && 'idiotRevealed' in p), false, `座位 ${seat} 旧房快照不带 idiotRevealed`);
+  }
+  // 狼座私有视角：isWolf 口径不崩（狼王同口径代码路径），旧房无 guard 字段不炸守卫分支
+  const cap = game.wolfCaptain(legacy.game);
+  const wSnap = logic.snapshotFor(legacy, cap);
+  assert.deepEqual(wSnap.you.wolves, legacy.game.players.filter((p) => p && game.isWolf(p.role)).map((p) => p.seat));
+  // 巡检 / 下一 alarm 时刻 / 闹钟接管条件（新字段缺失不影响心跳与作废口径）
+  const now = T0 + 200;
+  assert.equal(logic.sweep(legacy, now).changed, false, '新鲜心跳巡检无变化且不崩');
+  assert.equal(typeof logic.nextAlarmAt(legacy, now), 'number', 'nextAlarmAt 正常排程');
+  const off = structuredClone(legacy);
+  off.game.players[game.pendingSeat(off.game) - 1].isAI = true; // 白盒：待行动改 AI
+  off.heartbeats[off.ownerUid] = now - 40_000;
+  off.ownerOnline = false;
+  assert.equal(logic.alarmDriveDue(off, now), true, '房主掉线 + AI 待行动 → 接管条件照常成立');
+  assert.ok(logic.nextAlarmAt(off, now) >= now + logic.AI_DRIVE_CADENCE_MS, '接管节拍排进未来（防热循环）');
+  // 动作提交：狼密聊与定刀走内核部署过渡兜底后照常入账（log 增量即公开事件流）
+  const pend = game.pendingSeat(legacy.game);
+  let out = logic.applyAction(legacy, 'wolf-chat', driveSeat(legacy, pend, { text: '旧房密聊' }), { now, seed: 42 });
+  assert.ok(!out.error, `旧房密聊不应失败：${out.error}`);
+  assert.ok(Array.isArray(out.room.game.wolfChatLog) && out.room.game.wolfChatLog.length === 1, 'wolfChatLog 兜底回填入账');
+  const wolves = out.room.game.players.filter((p) => p && game.isWolf(p.role)).map((p) => p.seat);
+  for (const w of wolves) {
+    if (out.room.game.subPhase !== 'wolf') break;
+    out = logic.applyAction(out.room, 'wolf-target', driveSeat(out.room, w, { target: 2 }), { now: now + 10, seed: 42 });
+    assert.ok(!out.error, `旧房定刀不应失败：${out.error}`);
+  }
+  assert.equal(out.room.game.subPhase, 'seer', '旧房定刀后照常推进（enterGuard 跳过不依赖 guard 字段）');
+  // 旧房快照在推进后仍不带新字段（回填只补内核私有态，不伪造公开层）
+  assert.equal('board' in logic.snapshotFor(out.room, 1), false);
 });
 
 /* ---------------- AI 名册（ADR-0009）：/api/ai-roster 与 DO 开局内部抽取 ---------------- */

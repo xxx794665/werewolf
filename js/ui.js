@@ -24,9 +24,18 @@
  * ============================================================ */
 
 import { icon, iconEl } from "./icons.js";
+import { BOARDS, isWolf } from "../shared/game.js"; // §1.1 板子注册表 / §1.2 判狼口径（ADR-0013）
+import { aggregateStats } from "./archive.js"; // §3.3 战绩汇总（ADR-0015）
 
-export const ROLE_NAME = { werewolf: "狼人", villager: "平民", seer: "预言家", witch: "女巫", hunter: "猎人" };
-const ROLE_ICON = { werewolf: "wolf", villager: "villager", seer: "seer", witch: "witch", hunter: "hunter" };
+/* §1.2–1.4（ADR-0013）三新角色：狼王图复用狼头（处处视作狼），守卫 / 白痴复用现有图标 */
+export const ROLE_NAME = {
+  werewolf: "狼人", villager: "平民", seer: "预言家", witch: "女巫", hunter: "猎人",
+  wolfking: "狼王", guard: "守卫", idiot: "白痴",
+};
+const ROLE_ICON = {
+  werewolf: "wolf", villager: "villager", seer: "seer", witch: "witch", hunter: "hunter",
+  wolfking: "wolf", guard: "check", idiot: "villager",
+};
 const SUBPHASE_NAME = {
   night_hunter: "猎人翻牌",
   lastwords: "遗言",
@@ -36,6 +45,15 @@ const SUBPHASE_NAME = {
   pk_vote: "PK 投票",
   exile_lastwords: "放逐遗言",
   hunter: "猎人翻牌",
+  /* §2.6（ADR-0014）警长竞选与警徽流 + §1.3 守卫（夜里不露子阶段，guard 仅为兜底键） */
+  guard: "守卫守护",
+  elect_join: "上警表态",
+  elect_withdraw: "退水表态",
+  elect_campaign: "竞选发言",
+  elect_vote: "警长投票",
+  elect_pk_speak: "竞选 PK 发言",
+  elect_pk_vote: "警长 PK 投票",
+  badge: "警徽处置",
 };
 const DEATH_CAUSE = { blade: "夜里被刀", poison: "夜里被毒", shot: "被猎人带走", exile: "被放逐" };
 
@@ -226,6 +244,8 @@ function renderPhaseBanner(snap) {
     if (snap.pending != null) {
       parts.push(snap.pending === snap.mySeat ? "轮到你" : `轮到 ${snap.pending} 号`);
     }
+    /* §2.5（ADR-0014）警长座位全程公开：白天子行追加（判空容错旧局快照） */
+    if (snap.sheriff && snap.sheriff.seat != null) parts.push(`警长 ${snap.sheriff.seat} 号`);
     sub.append(el("span", null, parts.filter(Boolean).join(" · ")));
     /* 行动倒计时（仅联机白天带 deadline，§5.11；单机恒无） */
     if (snap.deadline && snap.deadline.at) {
@@ -235,6 +255,18 @@ function renderPhaseBanner(snap) {
       armCountdown(cd, snap.deadline.at);
     }
     box.append(sub);
+    /* §2.5 竞选公开信息（snap.election：举手 / 候选 / PK 台名单）在阶段区第二行可见 */
+    if (snap.election) {
+      const eln = snap.election;
+      const seg = [];
+      if (eln.stage === "join") {
+        seg.push(eln.run ? `上警表态中（已表态 ${Object.keys(eln.run).length} 人）` : "上警表态中");
+      }
+      if (eln.candidates && eln.candidates.length) seg.push(`候选 ${eln.candidates.join("、")} 号`);
+      if (eln.stage === "withdraw") seg.push("退水表态中");
+      if (eln.pkCandidates && eln.pkCandidates.length) seg.push(`PK 台 ${eln.pkCandidates.join("、")} 号`);
+      if (seg.length) box.append(el("div", "phase-election", `警长竞选：${seg.join(" · ")}`));
+    }
   } else {
     box.append(el("span", null, "对局"));
   }
@@ -251,7 +283,7 @@ function renderIdCard(snap) {
   if (!you.alive) head.append(badge("badge-muted", "skull", "已出局 · 观战"));
   card.append(head);
   const lines = [];
-  if (you.role === "werewolf" && you.wolves) {
+  if (isWolf(you.role) && you.wolves) { // §1.2（ADR-0013）狼王同狼口径：也知全体队友
     lines.push(`狼队友：${you.wolves.filter((s) => s !== you.seat).map((s) => `${s} 号`).join("、") || "无（你是最后一狼）"}`);
   }
   if (you.role === "seer" && you.checks && you.checks.length) {
@@ -259,6 +291,12 @@ function renderIdCard(snap) {
   }
   if (you.role === "witch") {
     lines.push(`解药${you.antidote ? "未用" : "已用"} · 毒药${you.poison ? "未用" : "已用"}`);
+  }
+  if (you.role === "guard" && you.guardLast != null) {
+    lines.push(`上晚守护：${you.guardLast} 号（今晚不可再守同一人）`); // §1.3 连守限制提示
+  }
+  if (you.idiotRevealed) {
+    lines.push("你已翻牌白痴：存活但失去投票权（仍可发言）。"); // §1.4 本人提示
   }
   if (you.blade != null && snap.phase === "night") {
     lines.push(you.role === "witch" ? `今夜刀口：${seatLabel(snap, you.blade)}` : `今夜刀口已定：${seatLabel(snap, you.blade)}`);
@@ -314,8 +352,7 @@ function renderLog(snap) {
   }
 }
 
-function logItem(snap, ev) {
-  switch (ev.t) {
+function logItem(snap, ev) {  switch (ev.t) {
     case "deaths":
       return el("li", "ev ev-deaths", ev.seats && ev.seats.length
         ? `天亮公布：昨晚 ${ev.seats.map((s) => seatLabel(snap, s)).join("、")} 死亡（不翻牌）。`
@@ -331,13 +368,49 @@ function logItem(snap, ev) {
     case "vote":
       return el("li", "ev ev-vote", `投票：${ev.voter} 号 → ${ev.target == null ? "弃票" : `${ev.target} 号`}`);
     case "exile":
+      /* §1.5（ADR-0013）白痴翻牌免死：不计入死亡名单，存活但失去投票权 */
+      if (ev.idiot) return el("li", "ev ev-sys", `放逐结果：${seatLabel(snap, ev.seat)} 翻牌白痴，放逐无效（存活但失去投票权）。`);
       return el("li", "ev ev-sys", ev.seat == null ? "放逐结果：无人出局（平安日）。" : `放逐结果：${seatLabel(snap, ev.seat)} 出局。`);
-    case "hunter":
+    case "hunter": {
+      /* §1.5（ADR-0013）狼王放逐翻牌：role 缺省按猎人渲染（向后兼容旧日志） */
+      const who = ev.role === "wolfking" ? "狼王" : "猎人";
       return el("li", "ev ev-hunter", ev.target == null
-        ? `${ev.seat} 号翻牌猎人，放弃开枪。`
-        : `${ev.seat} 号翻牌猎人，开枪带走 ${seatLabel(snap, ev.target)}（无遗言、不翻牌）。`);
+        ? `${ev.seat} 号翻牌${who}，放弃开枪。`
+        : `${ev.seat} 号翻牌${who}，开枪带走 ${seatLabel(snap, ev.target)}（无遗言、不翻牌）。`);
+    }
+    /* ---------- 警长竞选与警徽流（§2.5 / 附录 t-schema 最终版，ADR-0014） ---------- */
+    case "elect_run":
+      return el("li", "ev ev-sys", `上警表态：${ev.seat} 号${ev.run ? "上警参选" : "不上警"}。`);
+    case "elect_withdraw":
+      return el("li", "ev ev-sys", `退水表态：${ev.seat} 号${ev.quit ? "退水，退出竞选" : "留在台上"}。`);
+    case "elect_speech":
+      return el("li", "ev ev-speech", `${seatLabel(snap, ev.seat)}（竞选发言）：${ev.text}`);
+    case "elect_vote":
+      return el("li", "ev ev-vote", `警长投票：${ev.voter} 号 → ${ev.target == null ? "弃票" : `${ev.target} 号`}`);
+    case "sheriff":
+      return logSheriffItem(ev);
     case "digest":
       return el("li", "ev ev-sys", `【第 ${ev.day} 天摘要】${ev.text}`);
+    default:
+      return el("li", "ev ev-sys", "");
+  }
+}
+
+/** t:'sheriff' 事件行（附录 t-schema 最终版：elected / none / no-voters / tie-pk / transfer / destroy）。 */
+function logSheriffItem(ev) {
+  switch (ev.kind) {
+    case "elected":
+      return el("li", "ev ev-sys", `警长竞选结果：${ev.seat} 号当选警长。`);
+    case "no-voters":
+      return el("li", "ev ev-sys", "警长竞选结果：全员上警，无投票人，本局无警长。");
+    case "none":
+      return el("li", "ev ev-sys", "警长竞选结果：本局无警长。");
+    case "tie-pk":
+      return el("li", "ev ev-sys", `警长竞选平票：${(ev.pk || []).map((s) => `${s} 号`).join("、")} 进入 PK。`);
+    case "transfer":
+      return el("li", "ev ev-sys", `警徽移交：${ev.from} 号 → ${ev.to} 号接任警长。`);
+    case "destroy":
+      return el("li", "ev ev-sys", `${ev.from} 号撕毁警徽，本局无警长。`);
     default:
       return el("li", "ev ev-sys", "");
   }
@@ -361,6 +434,12 @@ function renderSeats(snap) {
     const badges = el("span", "seat-badges");
     for (const t of seatTags(p.seat)) badges.append(badge("badge-tag", null, t)); // 私人标签置前
     if (p.role && ROLE_NAME[p.role]) badges.append(badge("badge-role", ROLE_ICON[p.role], ROLE_NAME[p.role]));
+    /* §2.5（ADR-0014）警长徽章（全程公开）与竞选候选徽章（仅竞选期间快照带 election）；
+       判空容错旧局快照（无 sheriff / election 字段） */
+    if (snap.sheriff && p.seat === snap.sheriff.seat) badges.append(badge("badge-owner", "crown", "警长"));
+    if (snap.election && Array.isArray(snap.election.candidates) && snap.election.candidates.includes(p.seat)) {
+      badges.append(badge("badge-ok", null, "候选"));
+    }
     if (p.isAI) badges.append(badge("badge-muted", "robot", "AI"));
     if (p.hosted) badges.append(badge("badge-warn", "robot", "托管"));
     if (p.seat === snap.mySeat) badges.append(badge("badge-me", null, "我"));
@@ -567,8 +646,10 @@ function renderAction(snap, actions) {
     return;
   }
   if (!kind) {
-    if (snap.waitingOwner) {
-      panel.append(el("p", "hint", "等待房主驱动 AI（房主暂时掉线，恢复后自动继续）。"));
+    if (snap.serverDrive) {
+      /* §4.2（ADR-0016）waitingOwner 更名 serverDrive：服务端闹钟已接管 AI（判空安全，
+         部署窗口期旧快照无此字段 = 不显示而已） */
+      panel.append(el("p", "hint", "房主暂时掉线，AI 已由服务端自动接管。"));
     } else if (you && !you.alive) {
       panel.append(el("p", "hint", "你已出局，观战中（全员身份仅你可见）。"));
     } else if (snap.pending != null) {
@@ -609,6 +690,7 @@ function renderAction(snap, actions) {
     }
     case "vote": {
       panel.append(el("p", "action-title", "放逐投票：选出你认为最该出局的人（或弃票）"));
+      if (snap.sheriff && snap.sheriff.seat != null) panel.append(el("p", "hint", "警长一票算 1.5 票。")); // §2.4
       targetPicker(panel, snap, alive.filter((s) => s !== meSeat), (s) => `投票给 ${seatLabel(snap, s)}`, actions.vote);
       confirmButton(panel, "弃票", "本轮弃票", () => actions.vote(null));
       break;
@@ -616,6 +698,7 @@ function renderAction(snap, actions) {
     case "pk_vote": {
       const seats = snap.pkCandidates || [];
       panel.append(el("p", "action-title", `PK 投票：只能投 ${seats.join("、")} 号，或弃票`));
+      if (snap.sheriff && snap.sheriff.seat != null) panel.append(el("p", "hint", "警长一票算 1.5 票。")); // §2.4
       targetPicker(panel, snap, seats, (s) => `PK 投票给 ${seatLabel(snap, s)}`, actions.vote);
       confirmButton(panel, "弃票", "本轮弃票", () => actions.vote(null));
       break;
@@ -710,6 +793,80 @@ function renderAction(snap, actions) {
       confirmButton(panel, "放弃开枪", "放弃开枪", () => actions.hunterShoot(null));
       break;
     }
+    /* ---------- §1.3 守卫（ADR-0013）与 §2.3 警长竞选 / 警徽流（ADR-0014） ---------- */
+    case "guard": {
+      /* 座位选择含自己、不可空守（无跳过按钮）；上晚守护对象禁选（连守限制） */
+      panel.append(el("p", "action-title", "守卫守护：选择今晚要守护的人（可守自己，不可空守）"));
+      const marks = {};
+      if (you && you.guardLast != null) {
+        marks[you.guardLast] = { text: "上晚已守", disabled: true };
+        panel.append(el("p", "hint", `上晚守护了 ${seatLabel(snap, you.guardLast)}，今晚不可再守同一人。`));
+      }
+      targetPicker(panel, snap, alive, (s) => `守护 ${seatLabel(snap, s)}`, actions.guardProtect, marks);
+      break;
+    }
+    case "elect_join": {
+      panel.append(el("p", "action-title", "警长竞选：是否上警参选？（上警者不参与警长投票）"));
+      confirmButton(panel, "上警", "上警参选警长", () => actions.electRun(true), "btn-primary");
+      confirmButton(panel, "不上警", "不上警（保留警长投票权）", () => actions.electRun(false));
+      break;
+    }
+    case "elect_withdraw": {
+      panel.append(el("p", "action-title", "退水表态：退水将退出竞选（退水后可投票）"));
+      confirmButton(panel, "留在台上", "留在台上继续竞选", () => actions.electWithdraw(false), "btn-primary");
+      confirmButton(panel, "退水", "退水，退出警长竞选", () => actions.electWithdraw(true));
+      break;
+    }
+    case "elect_campaign":
+    case "elect_pk_speak": {
+      /* 竞选 / PK 自辩发言：复用发言输入组；按任务要求两步确认（确认条） */
+      const title = kind === "elect_campaign" ? "竞选发言：向台下玩家拉票" : "竞选 PK 发言：平票自辩，再争取一轮";
+      panel.append(el("p", "action-title", `${title}（不超过 250 字）`));
+      const ta = el("textarea", "speech-input");
+      ta.maxLength = 250;
+      ta.rows = 4;
+      ta.placeholder = "说点什么…";
+      const counter = el("p", "hint counter", "0 / 250");
+      ta.addEventListener("input", () => {
+        counter.textContent = `${ta.value.length} / 250`;
+      });
+      const send = el("button", "btn btn-primary", "提交发言");
+      send.type = "button";
+      send.addEventListener("click", () => {
+        const text = ta.value.trim();
+        if (!text) {
+          toast("发言不能为空");
+          return;
+        }
+        showConfirm("提交竞选发言 —— 确认后不可更改", () => actions.electSpeak(text));
+      });
+      panel.append(ta, counter, send);
+      break;
+    }
+    case "elect_vote": {
+      /* 主轮与 PK 轮同 kind：PK 轮只列 PK 台名单（snap.subPhase 区分轮次） */
+      const pkRound = snap.subPhase === "elect_pk_vote";
+      const eln = snap.election || {};
+      let seats = pkRound ? eln.pkCandidates || [] : eln.candidates || [];
+      if (!seats.length) seats = eln.candidates || eln.pkCandidates || []; // 都空时回退「台上候选人」
+      panel.append(el("p", "action-title", pkRound
+        ? `警长 PK 投票：只能投 ${seats.join("、")} 号，或弃票`
+        : "警长投票：选出你心中的警长（或弃票）"));
+      if (!seats.length) {
+        panel.append(el("p", "hint", "台上暂无候选人。"));
+        break;
+      }
+      targetPicker(panel, snap, seats, (s) => `投警长票给 ${seatLabel(snap, s)}`, actions.electVote);
+      confirmButton(panel, "弃票", "本轮警长投票弃票", () => actions.electVote(null));
+      break;
+    }
+    case "badge": {
+      /* 警徽处置（死亡警长本人）：移交存活座位或撕毁；两步确认 */
+      panel.append(el("p", "action-title", "你是出局的警长：把警徽移交给一名存活玩家，或撕毁警徽"));
+      targetPicker(panel, snap, alive, (s) => `把警徽移交给 ${seatLabel(snap, s)}`, actions.badgeMove);
+      confirmButton(panel, "撕毁警徽", "撕毁警徽（本局无警长）", () => actions.badgeMove(null));
+      break;
+    }
     default:
       panel.append(el("p", "hint", "等待中…"));
   }
@@ -741,7 +898,7 @@ function renderWolfHistory(snap) {
   const card = $("wolf-history");
   const you = snap.you;
   const log = you && Array.isArray(you.wolfChatLog) ? you.wolfChatLog : [];
-  const isWolfAlive = !!(you && you.role === "werewolf" && you.alive);
+  const isWolfAlive = !!(you && isWolf(you.role) && you.alive); // §1.2（ADR-0013）狼王同看密聊历史卡
   const wolfNightPanel = !!(snap.action && snap.action.kind === "wolf");
   const show = isWolfAlive && log.length > 0 && !wolfNightPanel && snap.phase !== "lobby" && snap.phase !== "revealed";
   card.classList.toggle("hidden", !show);
@@ -757,15 +914,49 @@ function renderWolfHistory(snap) {
  * 该轮结果，成对的 exile{null} 忽略）；票数从逐人 vote 重算，与内核 tally 同序
  * （票多在前、同票座位号小在前）。 */
 
-/** 公开事件流 → [{ day, kind: "main"|"pk", votes: [{voter,target}], tally: [{seat,count}], outcome }]；
- *  outcome = null（进行中）/ {type:"pk",seats} / {type:"exile",seat} / {type:"peaceful"}。 */
+/** 公开事件流 → [{ day, kind, votes: [{voter,target}], tally: [{seat,count}], outcome, sheriff }]；
+ *  kind = "main"|"pk"（放逐投票）/ "elect"|"elect_pk"（警长竞选，§2.5 ADR-0014）；
+ *  outcome = null（进行中）/ {type:"pk",seats} / {type:"exile",seat} / {type:"peaceful"}
+ *    / 竞选轮专有 {type:"elected",seat} / {type:"none"}；
+ *  sheriff = 该轮放逐投票时的在任警长座位（由日志 sheriff 事件推导，其票计 1.5 权重，§2.4；
+ *    竞选轮恒 null——警长尚未产生）。 */
 export function voteHistory(events) {
   const rounds = [];
-  let cur = null;
+  let cur = null; // 放逐投票当前轮
+  let curElect = null; // 警长竞选当前轮
+  let sheriffSeat = null; // 现任警长（elected/transfer/destroy 推导）
   for (const ev of events || []) {
+    if (ev.t === "sheriff") {
+      /* 警长座位推导（1.5 票权重依据）；同时给竞选轮收尾：
+         tie-pk 是竞选主轮与 PK 轮的分界；elected / none / no-voters 结清竞选 */
+      if (ev.kind === "elected") sheriffSeat = ev.seat;
+      else if (ev.kind === "transfer") sheriffSeat = ev.to;
+      else if (ev.kind === "destroy" || ev.kind === "none" || ev.kind === "no-voters") sheriffSeat = null;
+      if (curElect && !curElect.outcome) {
+        if (ev.kind === "tie-pk") curElect.outcome = { type: "pk", seats: ev.pk };
+        else if (ev.kind === "elected") curElect.outcome = { type: "elected", seat: ev.seat };
+        else if (ev.kind === "none" || ev.kind === "no-voters") curElect.outcome = { type: "none" };
+      }
+      continue;
+    }
+    if (ev.t === "elect_vote") {
+      /* 竞选轮：按天分组；同日已有收尾轮（tie-pk 后）→ 开 PK 轮（与主投票 tie 分轮界同口径） */
+      if (!curElect || curElect.day !== ev.day || curElect.outcome) {
+        curElect = {
+          day: ev.day,
+          kind: curElect && curElect.day === ev.day ? "elect_pk" : "elect",
+          votes: [],
+          outcome: null,
+          sheriff: null,
+        };
+        rounds.push(curElect);
+      }
+      curElect.votes.push({ voter: ev.voter, target: ev.target == null ? null : ev.target });
+      continue;
+    }
     if (ev.t === "vote") {
       if (!cur || cur.day !== ev.day || cur.outcome) {
-        cur = { day: ev.day, kind: cur && cur.day === ev.day ? "pk" : "main", votes: [], outcome: null };
+        cur = { day: ev.day, kind: cur && cur.day === ev.day ? "pk" : "main", votes: [], outcome: null, sheriff: sheriffSeat };
         rounds.push(cur);
       }
       cur.votes.push({ voter: ev.voter, target: ev.target == null ? null : ev.target });
@@ -778,12 +969,56 @@ export function voteHistory(events) {
   }
   for (const r of rounds) {
     const cnt = new Map();
-    for (const v of r.votes) if (v.target != null) cnt.set(v.target, (cnt.get(v.target) || 0) + 1);
+    for (const v of r.votes) {
+      if (v.target == null) continue;
+      /* §2.4 警长一票计 1.5（仅放逐主投票 / PK 投票；竞选轮 sheriff 恒 null 不加权） */
+      const w = r.sheriff != null && v.voter === r.sheriff ? 1.5 : 1;
+      cnt.set(v.target, (cnt.get(v.target) || 0) + w);
+    }
     r.tally = [...cnt.entries()]
       .map(([seat, count]) => ({ seat, count }))
       .sort((a, b) => b.count - a.count || a.seat - b.seat);
   }
   return rounds;
+}
+
+/* 轮次名（§2.5：竞选轮名「警长竞选」）与得票数字格式（1.5 票保留一位小数） */
+const VOTE_ROUND_NAME = { main: "主投票", pk: "PK 投票", elect: "警长竞选", elect_pk: "警长竞选 PK" };
+const fmtVoteCount = (n) => (Number.isInteger(n) ? String(n) : n.toFixed(1));
+
+/** 单轮投票记录 DOM（对局投票记录卡与复盘详情共用）。 */
+function voteRoundEl(r) {
+  const div = el("div", "vote-round");
+  const head = el("div", "vote-round-head", `第 ${r.day} 天 · ${VOTE_ROUND_NAME[r.kind] || "投票"}`);
+  if (!r.outcome) head.append(el("span", "vote-ongoing", "（进行中）"));
+  div.append(head);
+  const ul = el("ul", "vote-votes");
+  for (const v of r.votes) {
+    const who = r.sheriff != null && v.voter === r.sheriff ? `${v.voter} 号（警长，计 1.5 票）` : `${v.voter} 号`;
+    ul.append(el("li", null, `${who} → ${v.target == null ? "弃票" : `${v.target} 号`}`));
+  }
+  div.append(ul);
+  if (r.tally.length) {
+    div.append(el("div", "vote-round-meta", "得票：" + r.tally.map((t) => `${t.seat} 号 ${fmtVoteCount(t.count)} 票`).join("、")));
+  } else if (r.outcome) {
+    div.append(el("div", "vote-round-meta", "得票：无（全员弃票）")); // 已结算且零得票 = 全弃
+  }
+  if (r.outcome) {
+    const text = r.outcome.type === "pk"
+      ? `结果：平票，${r.outcome.seats.map((s) => `${s} 号`).join("、")} 进入 PK`
+      : r.outcome.type === "exile" ? `结果：放逐 ${r.outcome.seat} 号`
+      : r.outcome.type === "elected" ? `结果：${r.outcome.seat} 号当选警长`
+      : r.outcome.type === "none" ? "结果：本局无警长"
+      : "结果：无人出局（平安日）";
+    div.append(el("div", "vote-round-meta", text));
+  }
+  return div;
+}
+
+/** 投票轮次列表填充（对局卡 / 复盘详情共用）。 */
+function fillVoteRounds(box, rounds) {
+  box.textContent = "";
+  for (const r of rounds) box.append(voteRoundEl(r));
 }
 
 function renderVoteHistory(snap) {
@@ -792,31 +1027,7 @@ function renderVoteHistory(snap) {
   const show = rounds.length > 0 && snap.phase !== "lobby" && snap.phase !== "revealed";
   card.classList.toggle("hidden", !show);
   if (!show) return;
-  const box = $("vote-history-list");
-  box.textContent = "";
-  for (const r of rounds) {
-    const div = el("div", "vote-round");
-    const head = el("div", "vote-round-head", `第 ${r.day} 天 · ${r.kind === "pk" ? "PK 投票" : "主投票"}`);
-    if (!r.outcome) head.append(el("span", "vote-ongoing", "（进行中）"));
-    div.append(head);
-    const ul = el("ul", "vote-votes");
-    for (const v of r.votes) {
-      ul.append(el("li", null, `${v.voter} 号 → ${v.target == null ? "弃票" : `${v.target} 号`}`));
-    }
-    div.append(ul);
-    if (r.tally.length) {
-      div.append(el("div", "vote-round-meta", "得票：" + r.tally.map((t) => `${t.seat} 号 ${t.count} 票`).join("、")));
-    } else if (r.outcome) {
-      div.append(el("div", "vote-round-meta", "得票：无（全员弃票）")); // 已结算且零得票 = 全弃
-    }
-    if (r.outcome) {
-      const text = r.outcome.type === "pk"
-        ? `结果：平票，${r.outcome.seats.map((s) => `${s} 号`).join("、")} 进入 PK`
-        : r.outcome.type === "exile" ? `结果：放逐 ${r.outcome.seat} 号` : "结果：无人出局（平安日）";
-      div.append(el("div", "vote-round-meta", text));
-    }
-    box.append(div);
-  }
+  fillVoteRounds($("vote-history-list"), rounds);
 }
 
 export function renderGame(snap, actions) {
@@ -836,6 +1047,9 @@ export function renderRevealed(snap) {
     snap.winner === "good" ? "好人胜利" : snap.winner === "wolf" ? "狼人胜利" : "终局";
   const list = $("reveal-list");
   list.textContent = "";
+  /* §1.1（ADR-0013）板子名随终局复盘展示；旧局快照无 board 字段时按标准板兜底 */
+  const board = snap.board && BOARDS[snap.board] ? BOARDS[snap.board] : BOARDS.standard;
+  list.append(el("li", "reveal-item reveal-board", `板子：${board.name}`));
   if (snap.reason) {
     list.append(el("li", "reveal-item reveal-reason", snap.reason === "wolves-eliminated" ? "狼人全部出局。" : "狼人数量已不少于好人（屠城）。"));
   }
@@ -850,4 +1064,144 @@ export function renderRevealed(snap) {
     if (p.isAI) li.append(badge("badge-muted", "robot", "AI"));
     list.append(li);
   }
+}
+
+/* ---------- 板子选择卡（§1.1，ADR-0013）：单机屏与联机大厅房主同款 ----------
+ * 卡片 = 标题 + BOARDS 的 intro 介绍文案（注册表直读，不复制文案）；默认 standard。 */
+export function renderBoardPicker(box, selectedId, onPick) {
+  box.textContent = "";
+  for (const [id, b] of Object.entries(BOARDS)) {
+    const btn = el("button", "board-card" + (id === selectedId ? " is-selected" : ""));
+    btn.type = "button";
+    btn.setAttribute("aria-pressed", String(id === selectedId));
+    btn.append(el("span", "board-name", b.name), el("span", "board-intro", b.intro));
+    btn.addEventListener("click", () => onPick(id));
+    box.append(btn);
+  }
+}
+
+/* ---------- 战绩与复盘（§3.3，ADR-0015）：本地存档只读回放 ----------
+ * 顶部战绩汇总表（aggregateStats，可折叠 <details>）+ 对局列表（日期 / 板子名 /
+ * 模式 / 天数 / 胜方）→ 点开复盘详情（只读）：全员身份网格（role + death + won
+ * 标记）+ groupLogEvents 按天折叠完整日志 + voteHistory 投票记录（含竞选轮）。
+ * 列表 / 详情导航状态在本模块（archiveCache），返回列表不重读存储。 */
+
+let archiveCache = []; // 当前列表数据源（renderArchive 写入，详情返回列表复用）
+let archiveMyNick = "";
+
+export function renderArchive(records, myNick) {
+  archiveCache = Array.isArray(records) ? records : [];
+  archiveMyNick = myNick || "";
+  $("archive-detail").hidden = true;
+  $("archive-list-wrap").hidden = false;
+  const back = $("archive-back");
+  if (back) back.onclick = null;
+  fillArchiveStats($("archive-stats-body"));
+  const box = $("archive-list");
+  box.textContent = "";
+  if (!archiveCache.length) {
+    box.append(el("p", "hint", "还没有存档对局。打完一局（单机或联机）会自动入档，最多保留 30 局。"));
+    return;
+  }
+  for (const rec of archiveCache) {
+    const btn = el("button", "archive-item");
+    btn.type = "button";
+    const d = new Date(rec.ts || 0);
+    const when = `${d.getMonth() + 1}月${d.getDate()}日 ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    const winner = rec.winner === "wolf" ? "狼人胜" : rec.winner === "good" ? "好人胜" : "未终局";
+    btn.append(
+      el("span", "archive-item-main", `${rec.board && rec.board.name ? rec.board.name : "标准板"} · ${rec.mode === "online" ? "联机" : "单机"} · ${winner}`),
+      el("span", "archive-item-sub", `${when} · 第 ${rec.day} 天结束`),
+    );
+    btn.addEventListener("click", () => renderArchiveDetail(rec));
+    box.append(btn);
+  }
+}
+
+/** 战绩汇总表：昵称 / 局数 / 胜率 / 常用角色（前二）；「我」按当前昵称弱匹配高亮（§3.3 口径）。 */
+function fillArchiveStats(box) {
+  box.textContent = "";
+  const stats = aggregateStats(archiveCache);
+  if (!stats.length) {
+    box.append(el("p", "hint", "暂无战绩（只统计存档里的真人座位，AI 不计）。"));
+    return;
+  }
+  const table = el("table", "stats-table");
+  const head = el("tr");
+  for (const h of ["昵称", "局数", "胜率", "常用角色"]) head.append(el("th", null, h));
+  table.append(head);
+  for (const s of stats) {
+    const tr = el("tr", s.nick === archiveMyNick ? "stats-me" : null);
+    const roles = Object.entries(s.roles)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 2)
+      .map(([r]) => ROLE_NAME[r] || r)
+      .join(" / ");
+    tr.append(
+      el("td", null, s.nick),
+      el("td", null, String(s.games)),
+      el("td", null, `${Math.round(s.rate * 100)}%`),
+      el("td", null, roles || "—"),
+    );
+    table.append(tr);
+  }
+  box.append(table);
+}
+
+/** 复盘详情（只读）：身份网格（won 标记）+ 投票记录卡 + 按天折叠完整公开日志。 */
+function renderArchiveDetail(rec) {
+  $("archive-list-wrap").hidden = true;
+  const det = $("archive-detail");
+  det.hidden = false;
+  $("archive-back").onclick = () => renderArchive(archiveCache, archiveMyNick);
+  const body = $("archive-detail-body");
+  body.textContent = "";
+  const winner = rec.winner === "wolf" ? "狼人胜利" : rec.winner === "good" ? "好人胜利" : "未终局";
+  body.append(el("h3", null, `${rec.board && rec.board.name ? rec.board.name : "标准板"} · ${rec.mode === "online" ? "联机" : "单机"} · ${winner}`));
+  const d = new Date(rec.ts || 0);
+  body.append(el("p", "hint", `${d.getFullYear()} 年 ${d.getMonth() + 1} 月 ${d.getDate()} 日 · 第 ${rec.day} 天结束`));
+
+  /* 全员身份网格（终局已全员亮牌；won = 本局胜负，§3.1 记录时已按 isWolf 判定） */
+  const grid = el("ul", "reveal-list");
+  for (const p of rec.players || []) {
+    if (!p) continue;
+    const li = el("li", "reveal-item");
+    li.append(iconEl(ROLE_ICON[p.role] || "villager"));
+    const text = p.death
+      ? `${p.seat} 号 ${p.nick} · ${ROLE_NAME[p.role] || "?"} · 出局（第 ${p.death.day} 天${DEATH_CAUSE[p.death.cause] || ""}）`
+      : `${p.seat} 号 ${p.nick} · ${ROLE_NAME[p.role] || "?"} · 存活`;
+    li.append(el("span", null, text));
+    if (p.isAI) li.append(badge("badge-muted", "robot", "AI"));
+    if (p.won === true) li.append(badge("badge-ok", "check", "胜"));
+    else if (p.won === false) li.append(badge("badge-muted", null, "负"));
+    grid.append(li);
+  }
+  body.append(grid);
+
+  /* 投票记录（含警长竞选轮，§2.5 / §3.3；复用对局投票记录卡的轮次渲染） */
+  const rounds = voteHistory(rec.log);
+  if (rounds.length) {
+    const card = el("details", "card");
+    card.append(el("summary", null, "投票记录（按轮次）"));
+    const vb = el("div");
+    fillVoteRounds(vb, rounds);
+    card.append(vb);
+    body.append(card);
+  }
+
+  /* 按天折叠完整公开日志（复用 renderLog 形态；最新一天默认展开，复盘不做开合记忆） */
+  const logBox = el("div", "log");
+  const groups = groupLogEvents(rec.log);
+  const latestDay = groups.length ? groups[groups.length - 1].day : 0;
+  const snapLike = { players: rec.players || [] }; // logItem 的 seatLabel 只读 players
+  for (const g of groups) {
+    const detDay = el("details", "log-day");
+    detDay.open = g.day === latestDay;
+    detDay.append(el("summary", "log-day-head", `第 ${g.day} 天 · ${g.events.length} 条`));
+    const list = el("ul", "log-day-list");
+    for (const ev of g.events) list.append(logItem(snapLike, ev));
+    detDay.append(list);
+    logBox.append(detDay);
+  }
+  body.append(logBox);
 }

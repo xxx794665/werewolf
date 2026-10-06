@@ -20,6 +20,7 @@ import * as game from "../shared/game.js";
 import * as net from "./net.js";
 import * as ai from "./ai.js";
 import * as ui from "./ui.js";
+import * as archive from "./archive.js"; // §3（ADR-0015）本地存档 / 战绩：终局落档 + 复盘屏数据源
 
 /* ---------- 全局状态 ---------- */
 
@@ -62,12 +63,13 @@ function clearSolo() {
   localStorage.removeItem(SOLO_KEY);
 }
 
-/** 本人私有视角（worker/src/room-logic.js privateOf 的客户端同款，按 §4.1.6 口径）。 */
+/** 本人私有视角（worker/src/room-logic.js privateOf 的客户端同款，按 §4.1.6 口径；
+ *  §1.2–1.4 ADR-0013 同步：判狼走 isWolf（含狼王）、守卫 guardLast、翻牌白痴 idiotRevealed）。 */
 function privateOf(g, seat) {
   const meP = g.players[seat - 1];
   const you = { seat, alive: !!meP.alive, role: meP.role };
-  if (meP.role === "werewolf") {
-    you.wolves = g.players.filter((p) => p && p.role === "werewolf").map((p) => p.seat);
+  if (game.isWolf(meP.role)) {
+    you.wolves = g.players.filter((p) => p && game.isWolf(p.role)).map((p) => p.seat);
     if (meP.alive) you.wolfChatLog = g.wolfChatLog || []; // §4.1.1 跨夜保留，白天可回看
     if (g.phase === "night" && meP.alive && g.night) {
       if (g.night.blade != null) you.blade = g.night.blade;
@@ -84,6 +86,10 @@ function privateOf(g, seat) {
     const blade = game.witchSeesBlade(g); // 仅女巫子阶段且解药未用（§4.1.3）
     if (blade != null) you.blade = blade;
   }
+  if (meP.role === "guard") {
+    you.guardLast = g.guard && g.guard.last != null ? g.guard.last : null; // 裁定 10：连守限制依据（旧存档无 guard 字段 → null）
+  }
+  if (meP.idiotRevealed) you.idiotRevealed = true; // §1.4：翻牌白痴失去投票权（本人提示）
   return you;
 }
 
@@ -112,6 +118,7 @@ function soloSnap() {
     day: g.day,
     players: g.players.map((p) => {
       const e = { seat: p.seat, nick: p.nick, isAI: !!p.isAI, alive: !!p.alive };
+      if (p.idiotRevealed) e.idiotRevealed = true; // §1.4（ADR-0013）白痴翻牌态是公开信息（vote_result 已宣告）
       if (revealed || spectator || p.seat === mySeat) {
         e.role = p.role;
         if (p.death) e.death = p.death;
@@ -121,7 +128,21 @@ function soloSnap() {
     events: solo.log,
     you: privateOf(g, mySeat),
   };
+  /* §1.6 / §2.5（ADR-0013/0014）公开层新字段（与 room-logic snapshotFor 同形；
+     旧存档缺字段则不带——UI 侧全部判空容错） */
+  if (g.board != null) s.board = g.board;
+  if (g.sheriff) s.sheriff = { seat: g.sheriff.seat == null ? null : g.sheriff.seat }; // 警长全程公开（含夜里）
   if (!night) {
+    const eln = g.sheriff && g.sheriff.election;
+    if (eln) {
+      s.election = {
+        stage: eln.stage,
+        candidates: (eln.candidates || []).slice(),
+        ...(eln.stage === "join" ? { run: { ...eln.run } } : {}),
+        ...(eln.stage === "withdraw" ? { quit: { ...eln.quit } } : {}),
+        ...(eln.pkCandidates && eln.pkCandidates.length ? { pkCandidates: eln.pkCandidates.slice() } : {}),
+      };
+    }
     s.subPhase = g.subPhase; // §4.1.6：夜里不露子阶段
     if (pending != null) s.pending = pending;
     if (g.pkCandidates) s.pkCandidates = g.pkCandidates;
@@ -136,10 +157,27 @@ function soloSnap() {
     s.reason = g.reason;
   }
   if (pending === mySeat && ai.phaseOf(g)) s.action = { kind: ai.phaseOf(g) };
-  else if (meP.alive && meP.role === "werewolf" && g.phase === "night" && g.subPhase === "wolf") {
-    s.action = { kind: "wolf" }; // §4.1.1 狼队密聊+投票全员开放（不按 pending 排队）
+  else if (meP.alive && game.isWolf(meP.role) && g.phase === "night" && g.subPhase === "wolf") {
+    s.action = { kind: "wolf" }; // §4.1.1 狼队密聊+投票全员开放（§1.2 狼王同口径，不按 pending 排队）
   }
   return s;
+}
+
+/* 板子选择（§1.1，ADR-0013）：单机屏 / 联机大厅房主各持一份选中态，默认 standard */
+let soloBoard = game.DEFAULT_BOARD;
+let lobbyBoard = game.DEFAULT_BOARD;
+
+function renderSoloBoards() {
+  ui.renderBoardPicker($("solo-boards"), soloBoard, (id) => {
+    soloBoard = id;
+    renderSoloBoards();
+  });
+}
+function renderLobbyBoards() {
+  ui.renderBoardPicker($("lobby-boards"), lobbyBoard, (id) => {
+    lobbyBoard = id;
+    renderLobbyBoards();
+  });
 }
 
 async function startSolo(nick) {
@@ -154,6 +192,7 @@ async function startSolo(nick) {
     seed: crypto.getRandomValues(new Uint32Array(1))[0] | 0,
     solo: true,
     roster,
+    board: soloBoard, // §1.1：板子选择屏的选中值透传内核
   });
   if (r.error) return ui.toast(r.error);
   mode = "solo";
@@ -188,6 +227,13 @@ const soloActions = {
   witchPoison: (target) => soloSubmit({ type: "witch_move", seat: soloHumanSeat(), move: "poison", target }),
   witchSkip: () => soloSubmit({ type: "witch_move", seat: soloHumanSeat(), move: "skip" }),
   hunterShoot: (target) => soloSubmit({ type: "hunter_shoot", seat: soloHumanSeat(), target }),
+  /* §1.3 守卫 / §2.6 警长竞选与警徽流（ADR-0013/0014）：内核 type 直交 */
+  guardProtect: (target) => soloSubmit({ type: "guard_protect", seat: soloHumanSeat(), target }),
+  electRun: (run) => soloSubmit({ type: "elect_run", seat: soloHumanSeat(), run }),
+  electSpeak: (text) => soloSubmit({ type: "elect_speak", seat: soloHumanSeat(), text }),
+  electWithdraw: (quit) => soloSubmit({ type: "elect_withdraw", seat: soloHumanSeat(), quit }),
+  electVote: (target) => soloSubmit({ type: "elect_vote", seat: soloHumanSeat(), target }),
+  badgeMove: (target) => soloSubmit({ type: "badge_move", seat: soloHumanSeat(), target }),
 };
 
 function renderSolo() {
@@ -230,7 +276,35 @@ async function soloDrive() {
   } finally {
     if (solo) solo.driving = false;
   }
-  if (solo && solo.state.phase === "revealed") enterRevealed(soloSnap());
+  if (solo && solo.state.phase === "revealed") {
+    archiveSoloIfRevealed(); // §3.2（ADR-0015）：终局转移点落档（id 幂等）
+    enterRevealed(soloSnap());
+  }
+}
+
+/* ---------- 本地存档落档（§3.2，ADR-0015）：终局触发，id 幂等，失败静默 ---------- */
+
+const archivedIds = new Set(); // 本会话已入档 id（防轮询重复写盘；跨会话由 mergeArchive 按 id 去重兜底）
+
+function archiveSoloIfRevealed() {
+  if (!solo || solo.state.phase !== "revealed") return;
+  const rec = archive.buildArchiveRecord(solo.state, solo.log, { mode: "solo" }); // id 缺省 solo:${seed}
+  if (!rec || archivedIds.has(rec.id)) return;
+  archivedIds.add(rec.id);
+  archive.saveArchive(rec);
+}
+
+function archiveOnlineIfRevealed(s) {
+  if (!s || s.phase !== "revealed") return;
+  /* 快照即终局全量视图：players 已全员亮 role/death、events = 房间公开日志、board/winner/reason 齐备 */
+  const rec = archive.buildArchiveRecord(
+    { board: s.board, winner: s.winner, reason: s.reason, day: s.day, players: s.players },
+    s.events,
+    { mode: "online", id: "online:" + s.code },
+  );
+  if (!rec || archivedIds.has(rec.id)) return;
+  archivedIds.add(rec.id);
+  archive.saveArchive(rec);
 }
 
 /* ============================================================
@@ -256,6 +330,7 @@ function onSnapshot(err, s) {
     if (screen !== "screen-lobby") go("screen-lobby", `房间 ${s.code}`);
     renderLobby(s);
   } else if (s.phase === "revealed") {
+    archiveOnlineIfRevealed(s); // §3.2（ADR-0015）：收到 revealed 的那一次落档（id 幂等）
     enterRevealed(s);
   } else {
     if (screen !== "screen-game") go("screen-game", `房间 ${s.code}`);
@@ -270,6 +345,8 @@ function renderLobby(s) {
   const isOwner = s.owner === meUid;
   const allReady = humans.every((p) => p.ready);
   ui.renderLobby(s, { isOwner, canStart: isOwner && humans.length >= 3 && allReady });
+  /* §1.1（ADR-0013）板子选择：仅房主可见，随「开始游戏」提交；非房主不显示 */
+  $("lobby-board-wrap").hidden = !isOwner;
 }
 
 async function submitAct(action, body) {
@@ -288,6 +365,13 @@ const onlineActions = {
   witchPoison: (target) => submitAct("witch-move", { move: "poison", target }),
   witchSkip: () => submitAct("witch-move", { move: "skip" }),
   hunterShoot: (target) => submitAct("hunter-shoot", { target }),
+  /* §1.3 守卫 / §2.6 警长竞选与警徽流（ADR-0013/0014）：HTTP 路由名 kebab-case，body 不带 seat */
+  guardProtect: (target) => submitAct("guard-protect", { target }),
+  electRun: (run) => submitAct("elect-run", { run }),
+  electSpeak: (text) => submitAct("elect-speak", { text }),
+  electWithdraw: (quit) => submitAct("elect-withdraw", { quit }),
+  electVote: (target) => submitAct("elect-vote", { target }),
+  badgeMove: (target) => submitAct("badge-move", { target }),
 };
 
 /* ---- 房主驱动 AI（§7.6：快照 owner == me 才驱动） ----
@@ -372,16 +456,22 @@ function bind() {
       if (target === "screen-menu") leaveToMenu();
       else if (target === "screen-online") enterOnlineScreen();
       else if (target === "screen-settings") fillSettings();
-      go(target, { "screen-solo": "单机开局", "screen-online": "联机房间", "screen-settings": "AI 设置" }[target] || "");
+      else if (target === "screen-archive") ui.renderArchive(archive.loadArchives(), net.me().nick); // §3.3 战绩与复盘
+      go(target, { "screen-solo": "单机开局", "screen-online": "联机房间", "screen-settings": "AI 设置", "screen-archive": "战绩与复盘" }[target] || "");
     });
   }
+
+  /* 板子选择卡（§1.1）：单机屏与联机大厅（房主）各一份，选中态留本屏 */
+  renderSoloBoards();
+  renderLobbyBoards();
 
   /* 单机开局（开始游戏 = 不可逆，两步确认，§1） */
   $("solo-start").addEventListener("click", () => {
     const nick = takeNick("solo-nick");
     if (!nick) return;
     if (!ai.hasConfig()) ui.toast("未配置自有 AI 接口：AI 走内置体验通道（可在 AI 设置里换成自己的）");
-    ui.showConfirm(`以「${nick}」开始单机对局（你 + 8 个 AI）`, () => startSolo(nick));
+    const boardName = (game.BOARDS[soloBoard] || game.BOARDS[game.DEFAULT_BOARD]).name;
+    ui.showConfirm(`以「${nick}」开始单机对局（${boardName}，你 + 8 个 AI）`, () => startSolo(nick));
   });
 
   /* 建房 / 进房 / 回房 */
@@ -417,12 +507,13 @@ function bind() {
     if (humans.length < 3) return ui.toast("至少 3 名真人才能开桌（空位会由 AI 补足）"); // §7.4
     if (!humans.every((p) => p.ready)) return ui.toast("仍有真人未准备");
     const empty = 9 - snap.players.filter(Boolean).length;
+    const boardName = (game.BOARDS[lobbyBoard] || game.BOARDS[game.DEFAULT_BOARD]).name;
     const text =
-      empty > 0
+      (empty > 0
         ? `将补 ${empty} 个 AI 补足 9 人开局（以提交瞬间房间实况为准）` // §7.4：N 只是预估
-        : "9 人满员，确认开局";
+        : "9 人满员，确认开局") + `；板子：${boardName}`;
     ui.showConfirm(text, async () => {
-      const r = await submitAct("start");
+      const r = await submitAct("start", { board: lobbyBoard }); // §1.1：房主选板随 start 提交
       if (r && r.ok && typeof r.aiFilled === "number" && r.aiFilled > 0) ui.toast(`已开局，AI 补位 ${r.aiFilled} 个`);
     });
   });
@@ -515,13 +606,16 @@ function boot() {
   /* 房主驱动 AI 的兜底节拍：夜里快照冻结（§4.1.6），不能只靠快照触发 */
   setInterval(() => maybeDriveAI(snap), 4000);
 
-  /* 断线重连 / 刷新恢复（§2：localStorage 固定身份） */
+  /* 断线重连 / 刷新恢复（§2：localStorage 固定身份）；
+     旧版存档（无 board/guard/sheriff 字段）由 privateOf / soloSnap 判空容错，内核自带兜底 */
   const s = loadSolo();
   if (s) {
     mode = "solo";
     solo = { state: s.state, log: s.log, driving: false };
-    if (solo.state.phase === "revealed") enterRevealed(soloSnap());
-    else {
+    if (solo.state.phase === "revealed") {
+      archiveSoloIfRevealed(); // §3.2：恢复到的旧终局也补落档（id 幂等）
+      enterRevealed(soloSnap());
+    } else {
       enterGame();
       soloDrive(); // 恢复后先把欠下的 AI 行动补上
     }

@@ -159,20 +159,43 @@ async function requestOnce(cfg, messages, budget, timeoutMs) {
 
 /* ---------- §5.1 响应解析（宽容序：save/skip → 第一个 1–9 数字） ----------
  * 返回 shared/game.js 内核动作（不带 seat，调用方补）；解析失败返回 null → 回退。
- * 狼阶段是两行格式（密聊 + 投票），不走此函数，见 parseWolfReply。 */
+ * 狼阶段是两行格式（密聊 + 投票），不走此函数，见 parseWolfReply。
+ * §1.3 / §2.6（ADR-0013/0014）扩：guard / elect_* / badge 分支——
+ *   竞选发言（elect_campaign / elect_pk_speak）与发言三元组同步扩（裁定 5），
+ *   但内核走 elect_speak（hElectSpeak 队列），不是 speak；
+ *   elect_join 的 run/pass、elect_withdraw 的 quit/stay 二选一关键字必须
+ *   先于通用 skip/pass 判定（B3-1：elect_join 的 pass=不上警，与既有
+ *   pass=skip 弃票语义撞车）；badge 的 skip = 撕毁警徽（§2.6）。 */
 export function parseReply(phase, text) {
   if (typeof text !== "string") return null;
   if (phase === "speak" || phase === "lastwords" || phase === "pk_speak") {
     const t = clipSpeech(text.trim(), game.SPEECH_MAX); // 硬上限 250 字，尽量按句收尾（ADR-0012），DO / 内核也会拒超长
     return t ? { type: "speak", text: t } : null;
   }
+  if (phase === "elect_campaign" || phase === "elect_pk_speak") {
+    const t = clipSpeech(text.trim(), game.SPEECH_MAX); // 裁定 5：竞选发言同款截断；动作走 elect_speak
+    return t ? { type: "elect_speak", text: t } : null;
+  }
   const s = text.trim().toLowerCase().replace(/[\s.,;:!?，。；：！？、"'`()[\]{}<>《》-]/g, "");
+  /* §2.6 竞选二选一关键字（先于通用 skip/pass，B3-1 顺序陷阱） */
+  if (phase === "elect_join") {
+    if (s === "run") return { type: "elect_run", run: true };
+    if (s === "pass") return { type: "elect_run", run: false };
+    return null;
+  }
+  if (phase === "elect_withdraw") {
+    if (s === "quit") return { type: "elect_withdraw", quit: true };
+    if (s === "stay") return { type: "elect_withdraw", quit: false };
+    return null;
+  }
   if (s === "save") return phase === "witch" ? { type: "witch_move", move: "save" } : null;
   if (s === "skip" || s === "pass") {
     if (phase === "witch") return { type: "witch_move", move: "skip" };
     if (phase === "hunter") return { type: "hunter_shoot", target: null };
     if (phase === "vote" || phase === "pk_vote") return { type: "vote", target: null };
-    return null; // wolf / seer 不可 skip（§5.10 / §4.1.2）→ 回退
+    if (phase === "elect_vote") return { type: "elect_vote", target: null }; // 警长票弃票（§2.3）
+    if (phase === "badge") return { type: "badge_move", target: null }; // skip = 撕毁警徽（§2.6）
+    return null; // wolf / seer / guard 不可 skip（§5.10 / §4.1.2 / §1.3）→ 回退
   }
   const m = s.match(/[1-9]/);
   if (!m) return null;
@@ -187,6 +210,12 @@ export function parseReply(phase, text) {
     case "vote":
     case "pk_vote":
       return { type: "vote", target: n };
+    case "guard":
+      return { type: "guard_protect", target: n }; // §1.3 守卫：座位号，不可跳过
+    case "elect_vote":
+      return { type: "elect_vote", target: n };
+    case "badge":
+      return { type: "badge_move", target: n }; // 座位号 = 移交警徽（§2.6）
     default:
       return null;
   }
@@ -245,16 +274,50 @@ export function toHistory(events) {
       case "vote":
         out.push({ t: "vote", day: ev.day, voter: ev.seat, target: ev.target });
         break;
-      case "vote_result":
+      case "vote_result": {
         if (ev.pk) out.push({ t: "tie", day: ev.day, seats: ev.pk });
-        out.push({ t: "exile", day: ev.day, seat: ev.exiled == null ? null : ev.exiled });
+        /* §1.5（ADR-0013）白痴翻牌免死标记：仅 idiot:true 时带字段，缺省省略保旧形状 */
+        const exile = { t: "exile", day: ev.day, seat: ev.exiled == null ? null : ev.exiled };
+        if (ev.idiot) exile.idiot = true;
+        out.push(exile);
         break;
+      }
       case "hunter_shoot":
-        out.push({ t: "hunter", day: ev.day, seat: ev.seat, target: ev.target });
+      case "hunter_skip": {
+        /* §1.5（ADR-0013）狼王翻牌可选 role：仅带值时写字段，缺省省略按猎人
+         * 渲染（向后兼容旧日志与旧板事件形状） */
+        const h = { t: "hunter", day: ev.day, seat: ev.seat, target: ev.type === "hunter_skip" ? null : ev.target };
+        if (ev.role) h.role = ev.role;
+        out.push(h);
         break;
-      case "hunter_skip":
-        out.push({ t: "hunter", day: ev.day, seat: ev.seat, target: null });
+      }
+      /* ---------- 警长竞选与警徽流（附录 t-schema 最终版，ADR-0014） ---------- */
+      case "elect_run":
+        out.push({ t: "elect_run", day: ev.day, seat: ev.seat, run: ev.run });
         break;
+      case "elect_speech":
+        out.push({ t: "elect_speech", day: ev.day, seat: ev.seat, text: ev.text });
+        break;
+      case "elect_withdraw":
+        out.push({ t: "elect_withdraw", day: ev.day, seat: ev.seat, quit: ev.quit });
+        break;
+      case "elect_vote":
+        out.push({ t: "elect_vote", day: ev.day, voter: ev.seat, target: ev.target });
+        break;
+      case "sheriff_result": {
+        const s = { t: "sheriff", day: ev.day, kind: ev.kind };
+        if (ev.seat != null) s.seat = ev.seat;
+        if (ev.pk != null) s.pk = ev.pk;
+        out.push(s);
+        break;
+      }
+      case "badge_move": {
+        /* badge_move 并入 t:'sheriff'（kind transfer/destroy，带 from/to，附录最终版） */
+        const b = { t: "sheriff", day: ev.day, kind: ev.to == null ? "destroy" : "transfer", from: ev.from };
+        if (ev.to != null) b.to = ev.to;
+        out.push(b);
+        break;
+      }
       default:
         break; // game_start / game_over / hunter_flip：不进 AI 历史（§1.3 schema 外）
     }
@@ -273,12 +336,24 @@ function digestOfDay(day, evs) {
       parts.push(ev.seats.length ? `昨晚 ${ev.seats.join("、")} 号死亡` : "平安夜");
     } else if (ev.t === "exile") {
       if (ev.seat != null) {
-        dead.add(ev.seat);
-        parts.push(`${ev.seat} 号被放逐`);
+        /* §1.4（ADR-0013）白痴翻牌免死：存活（只失去投票权），不得计入 dead
+         * ——否则 buildMessages 的存活推导出错，后续动作全部干跑失败 */
+        if (ev.idiot === true) parts.push(`${ev.seat} 号翻牌白痴，放逐无效`);
+        else {
+          dead.add(ev.seat);
+          parts.push(`${ev.seat} 号被放逐`);
+        }
       } else parts.push("无人出局");
     } else if (ev.t === "hunter" && ev.target != null) {
       dead.add(ev.target);
-      parts.push(`猎人 ${ev.seat} 号带走 ${ev.target} 号`);
+      /* §1.5（ADR-0013）狼王翻牌带走人：文案按 role 泛化，dead 推导不变 */
+      parts.push(`${ev.role === "wolfking" ? "狼王" : "猎人"} ${ev.seat} 号带走 ${ev.target} 号`);
+    } else if (ev.t === "sheriff") {
+      /* 裁定 9（ADR-0014）：警长信息保留一行摘要——老天数 AI 才推得出警长与
+       * 1.5 票；elect_* 压缩丢弃可接受（竞选仅 day 1） */
+      if (ev.kind === "elected") parts.push(`${ev.seat} 号当选警长`);
+      else if (ev.kind === "transfer") parts.push(`警徽移交给 ${ev.to} 号`);
+      else if (ev.kind === "destroy") parts.push("警长撕毁警徽");
     }
   }
   // dead 必须完整列出该天全部出局座位，否则 buildMessages 的存活推导出错（§5.4）
@@ -314,6 +389,8 @@ export function phaseOf(g) {
   switch (`${g.phase}:${g.subPhase}`) {
     case "night:wolf":
       return "wolf";
+    case "night:guard":
+      return "guard"; // §1.3（ADR-0013）守卫守护
     case "night:seer":
       return "seer";
     case "night:witch":
@@ -324,6 +401,19 @@ export function phaseOf(g) {
     case "day:lastwords":
     case "day:exile_lastwords":
       return "lastwords";
+    case "day:elect_join":
+      return "elect_join"; // §2.6（ADR-0014）警长竞选
+    case "day:elect_withdraw":
+      return "elect_withdraw";
+    case "day:elect_campaign":
+      return "elect_campaign";
+    case "day:elect_pk_speak":
+      return "elect_pk_speak"; // 裁定 6：平票自辩单独成任务
+    case "day:elect_vote":
+    case "day:elect_pk_vote":
+      return "elect_vote"; // §2.6：PK 轮与主轮同为警长票（候选集由任务文案收窄）
+    case "day:badge":
+      return "badge"; // §2.3 警徽处置
     case "day:speak":
       return "speak";
     case "day:pk_speak":
@@ -337,10 +427,16 @@ export function phaseOf(g) {
   }
 }
 
-/* 内核角色名 → AI 契约角色名（docs/ai-prompts.md §1.2） */
-const PROMPT_ROLE = { werewolf: "wolf", villager: "villager", seer: "seer", witch: "witch", hunter: "hunter" };
+/* 内核角色名 → AI 契约角色名（docs/ai-prompts.md §1.2）；
+ * §1.2–1.4（ADR-0013）三新角色契约名与内核同名，显式列出防漂移 */
+const PROMPT_ROLE = {
+  werewolf: "wolf", wolfking: "wolfking", villager: "villager", seer: "seer",
+  witch: "witch", hunter: "hunter", guard: "guard", idiot: "idiot",
+};
 
-/** 单机本地组装该座位的身份卡（§1.2 schema；本地持有全量状态，只取合法私有字段）。 */
+/** 单机本地组装该座位的身份卡（§1.2 schema；本地持有全量状态，只取合法私有字段）。
+ *  §1.6 / 裁定 9–10（ADR-0013/0014）：board / sheriff / election 是公开层字段
+ *  （roster 同款先例），guardLast 是守卫私有字段（仅守卫座携带）。 */
 export function roleCardOf(g, seat) {
   const p = g.players[seat - 1];
   if (!p) return null;
@@ -348,8 +444,15 @@ export function roleCardOf(g, seat) {
   /* 公开层（ADR-0009）：全员昵称对照 + 本人 AI 人格（风格层，与身份无关） */
   card.roster = g.players.filter(Boolean).map((x) => ({ seat: x.seat, nick: x.nick }));
   if (p.persona) card.persona = p.persona;
-  if (p.role === "werewolf") {
-    card.wolves = g.players.filter((x) => x && x.role === "werewolf").map((x) => x.seat);
+  card.board = g.board || "standard"; // §1.6 板子 id（旧存档 g.board 缺失兜底）
+  card.sheriff = g.sheriff && g.sheriff.seat != null ? g.sheriff.seat : null; // 裁定 9：警长座位公开
+  const el = g.sheriff && g.sheriff.election;
+  if (el) {
+    /* 裁定 9/11：竞选公开层——主轮 elect_vote 候选来源 + PK 台名单 */
+    card.election = { candidates: (el.candidates || []).slice(), pk: (el.pkCandidates || []).slice() };
+  }
+  if (game.isWolf(p.role)) {
+    card.wolves = g.players.filter((x) => x && game.isWolf(x.role)).map((x) => x.seat); // §1.2 狼王同列
     card.wolfChatLog = g.wolfChatLog || []; // §4.1.1 狼队私有频道全程日志（跨夜保留；白天任务也带）
     if (g.phase === "night" && g.subPhase === "wolf" && g.night) {
       card.wolfVotes = g.night.wolfVotes || {};
@@ -364,6 +467,9 @@ export function roleCardOf(g, seat) {
     card.poison = g.witch.poison > 0;
     const blade = game.witchSeesBlade(g); // 仅女巫行动夜且解药未用（§4.1.3）
     if (blade != null) card.knifeTarget = blade;
+  }
+  if (p.role === "guard") {
+    card.guardLast = g.guard && g.guard.last != null ? g.guard.last : null; // 裁定 10：连守限制依据（仅守卫座携带）
   }
   return card;
 }

@@ -11,7 +11,7 @@
  *   新增 / 删除模块或资源时同步更新 SHELL 清单并 +1。
  * ============================================================ */
 
-const CACHE = "werewolf-v19";
+const CACHE = "werewolf-v21";
 
 const SHELL = [
   "./",
@@ -25,6 +25,7 @@ const SHELL = [
   "./js/net.js",
   "./js/ai.js",
   "./js/icons.js",
+  "./js/archive.js",
   "./js/ui.js",
   "./js/app.js",
   "./assets/icons/icon.svg",

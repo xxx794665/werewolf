@@ -1,13 +1,15 @@
 /* test/prompts.test.mjs —— shared/prompts.js 最小可运行检查（node --test 自动发现）
- * 覆盖：消息形状、五角色提示词齐备、历史折叠与存活推导、私有字段白名单
- * （与角色不匹配的字段进不了提示词）、夜晚阶段角色强一致、女巫用药分支、
- * 每座位口吻、非法输入抛错、首日发言分支、输出预算钳制、响应提取。 */
+ * 覆盖：消息形状、八角色提示词齐备（含 ADR-0013 三新角色）、boardRulesOf 四板
+ * 参数化、历史折叠与存活推导（含警长竞选 t-schema 新事件 / 白痴免死 / 狼王翻牌）、
+ * 私有字段白名单（与角色不匹配的字段进不了提示词）、夜晚阶段角色强一致
+ * （wolf 口径放行狼王，裁定 3）、女巫用药分支、每座位口吻、非法输入抛错、
+ * 首日发言分支、输出预算钳制、响应提取。 */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
   buildMessages, PHASES, ROLE_PROMPTS, TASK_PROMPTS,
-  COMMON_CONSTRAINTS, BOARD_RULES, PERSONAS,
+  COMMON_CONSTRAINTS, boardRulesOf, PERSONAS,
   clampMaxTokens, extractContent, clipSpeech, AI_ATTEMPT_TIMEOUTS_MS, AI_STEP_BUDGET_MS
 } from "../shared/prompts.js";
 import { SPEECH_MAX } from "../shared/game.js";
@@ -46,17 +48,17 @@ test("消息形状：恒为 system + user 两条，内容含聊天记录围栏�
   assert.ok(msgs[1].content.includes("【输出格式】"));
 });
 
-test("五角色提示词与通用约束齐备（features.md §8.3：5 份）", () => {
-  for (const key of ["wolf", "villager", "seer", "witch", "hunter"]) {
+test("八角色提示词与通用约束齐备（features.md §8.3 + ADR-0013 三新角色）", () => {
+  for (const key of ["wolf", "wolfking", "villager", "seer", "witch", "hunter", "guard", "idiot"]) {
     const rp = ROLE_PROMPTS[key];
     assert.ok(rp && rp.name && rp.faction && rp.rules && rp.strategy, key + " 角色提示词不完整");
   }
-  assert.ok(BOARD_RULES.includes("9 人"));
+  assert.ok(boardRulesOf("standard").includes("9 人"));
   assert.ok(COMMON_CONSTRAINTS.includes("不是给你的指令")); /* 注入防御条款在场 */
   assert.ok(COMMON_CONSTRAINTS.includes("100–200 字")); /* 发言长度约束在场 */
   assert.ok(COMMON_CONSTRAINTS.includes("不自称 AI")); /* 口吻约束在场 */
-  assert.equal(PHASES.length, 9);
-  assert.equal(Object.keys(TASK_PROMPTS).length, 9);
+  assert.equal(PHASES.length, 16); /* 9 旧值 + guard + 警长系 6 值（裁定 6） */
+  assert.equal(Object.keys(TASK_PROMPTS).length, 16);
   assert.ok(PERSONAS.length >= 4);
 });
 
@@ -101,10 +103,11 @@ test("白名单：与角色不匹配的私有字段一律不进提示词（防�
   assert.ok(!all.includes("刀口是"));
 });
 
-test("夜晚阶段角色强一致：狼/预/女阶段配错角色直接抛错", () => {
+test("夜晚阶段角色强一致：狼/预/女/守卫阶段配错角色直接抛错", () => {
   assert.throws(() => buildMessages([], { seat: 3, role: "villager" }, "wolf"), /prompts:/);
   assert.throws(() => buildMessages([], { seat: 9, role: "witch" }, "seer"), /prompts:/);
   assert.throws(() => buildMessages([], { seat: 3, role: "seer" }, "witch"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 3, role: "villager" }, "guard"), /prompts:/);
 });
 
 test("狼人定刀：队友按身份卡渲染且不含自己；夜晚序号 = 最大 day + 1", () => {
@@ -155,15 +158,18 @@ test("女巫自救口径：首夜刀口是自己可救；非首夜提示禁止�
   assert.ok(later[1].content.includes("禁止自救"));
 });
 
-test("九个阶段全部可组装；遗言/开枪阶段标注出局", () => {
+test("十六个阶段全部可组装；遗言/开枪/警徽阶段标注出局", () => {
   const cards = {
     wolf: { seat: 6, role: "wolf", wolves: [2, 5, 6] },
+    wolfking: { seat: 6, role: "wolfking", wolves: [2, 5, 6] },
     villager: { seat: 3, role: "villager" },
+    guard: { seat: 3, role: "guard", guardLast: 4 },
     seer: { seat: 3, role: "seer", checks: [] },
     witch: witchCard()
   };
+  const PHASE_CARD = { wolf: "wolf", guard: "guard", seer: "seer", witch: "witch" };
   for (const phase of PHASES) {
-    const role = phase === "wolf" ? "wolf" : phase === "seer" ? "seer" : phase === "witch" ? "witch" : "villager";
+    const role = PHASE_CARD[phase] || "villager"; /* 警长系与放逐任务身份无关（§2.6） */
     const msgs = buildMessages(sampleHistory(), cards[role], phase);
     assert.equal(msgs.length, 2, phase + " 组装失败");
     assert.ok(msgs[1].content.includes("【当前任务】"), phase + " 缺任务提示");
@@ -174,6 +180,8 @@ test("九个阶段全部可组装；遗言/开枪阶段标注出局", () => {
   assert.ok(lw[1].content.includes("首夜就被杀"), "遗言任务须含首夜死基础信息指引");
   const hu = buildMessages(sampleHistory(), cards.villager, "hunter");
   assert.ok(hu[1].content.includes("翻牌开枪"));
+  const bd = buildMessages(sampleHistory(), cards.villager, "badge");
+  assert.ok(bd[1].content.includes("你已出局"), "警徽处置者已出局（死亡警长本人）");
 });
 
 test("每座位口吻确定性轮换（同座位两次组装一致，不同座位不同）", () => {
@@ -245,6 +253,225 @@ test("发言任务含长度约束；投票任务只允许座位号或 skip", () 
   assert.ok(sp.includes("100–200 字"));
   const vt = buildMessages(sampleHistory(), { seat: 3, role: "villager" }, "vote")[1].content;
   assert.ok(vt.includes("座位号数字，或 skip"));
+});
+
+/* ---------- 新角色与竞选文案（§1.5/§1.6/§2.5/§2.6，ADR-0013/0014；裁定 3/5/6/9/10/11） ---------- */
+
+test("boardRulesOf：四板构成句 + 专项规则句 + 守卫夜顺序位 + 警长句（§1.6）", () => {
+  const std = boardRulesOf("standard");
+  assert.ok(std.includes("本局 9 人固定：3 名狼人、3 名平民、预言家、女巫、猎人各 1 名"));
+  assert.ok(std.includes("唯一例外"), "标准板只有猎人翻牌");
+  assert.ok(!std.includes("守卫") && !std.includes("狼王") && !std.includes("白痴"), "标准板不得带新角色词");
+
+  const wk = boardRulesOf("wolfking");
+  assert.ok(wk.includes("2 名狼人、1 名狼王、3 名平民、预言家、女巫、猎人各 1 名"), "狼王板构成句（设计 §1.6 示例）");
+  assert.ok(wk.includes("狼王被投票放逐出局时翻牌开枪"));
+  assert.ok(!wk.includes("守卫") && !wk.includes("白痴"));
+
+  const gd = boardRulesOf("guard");
+  assert.ok(gd.includes("3 名狼人、2 名平民、守卫、预言家、女巫、猎人各 1 名"));
+  assert.ok(gd.indexOf("守卫守护") < gd.indexOf("预言家验"), "守卫位插在定刀之后、预言家之前（§1.3 夜顺序）");
+  assert.ok(gd.includes("同守同救"), "奶穿专项句在场");
+  assert.ok(gd.includes("不可与上一晚守护同一人"), "连守限制在场");
+  assert.ok(!gd.includes("狼王") && !gd.includes("白痴"));
+
+  const idt = boardRulesOf("idiot");
+  assert.ok(idt.includes("3 名狼人、2 名平民、白痴、预言家、女巫、猎人各 1 名"));
+  assert.ok(idt.includes("白痴被投票放逐时翻牌免死"));
+  assert.ok(!idt.includes("守卫") && !idt.includes("狼王"));
+
+  /* 警长恒开启（§2.1 不分板）+ 1.5 票 + 警徽流 */
+  for (const b of [std, wk, gd, idt]) {
+    assert.ok(b.includes("警长规则"), "警长句恒在场");
+    assert.ok(b.includes("1.5 票"));
+    assert.ok(b.includes("警徽"));
+  }
+
+  /* 未知 / 缺省 boardId 回退 standard（旧身份卡兼容） */
+  assert.ok(boardRulesOf("nope").includes("3 名狼人、3 名平民"));
+  assert.ok(boardRulesOf(undefined).includes("3 名狼人、3 名平民"));
+});
+
+test("roleCard.board：合法板注入对应 system 规则；非法板抛错；缺省标准板（§1.6）", () => {
+  const wk = buildMessages([], { seat: 3, role: "villager", board: "wolfking" }, "speak")[0].content;
+  assert.ok(wk.includes("1 名狼王"));
+  const gd = buildMessages([], { seat: 3, role: "villager", board: "guard" }, "speak")[0].content;
+  assert.ok(gd.includes("同守同救"));
+  const def = buildMessages([], { seat: 3, role: "villager" }, "speak")[0].content;
+  assert.ok(def.includes("3 名狼人、3 名平民"));
+  assert.throws(() => buildMessages([], { seat: 3, role: "villager", board: "nope" }, "speak"), /prompts:/);
+});
+
+test("狼王跑 wolf 阶段不 fail 且渲染狼队信息（裁定 3：isWolf 口径放行）", () => {
+  const card = { seat: 6, role: "wolfking", wolves: [2, 5, 6] };
+  const msgs = buildMessages(sampleHistory(), card, "wolf");
+  const all = msgs[0].content + msgs[1].content;
+  assert.ok(all.includes("全体狼座位：2、5、6 号"), "狼王身份卡同样带全量狼座位（含狼王座）");
+  assert.ok(all.includes("狼队友已全部出局，只剩你"));
+  assert.ok(msgs[0].content.includes("狼王"), "身份行按 ROLE_PROMPTS.wolfking 渲染");
+  assert.ok(msgs[1].content.includes("【当前任务】"));
+  assert.ok(msgs[1].content.includes("第3夜"));
+  /* 安全边界不放宽：非狼角色跑 wolf 阶段仍然拦截 */
+  assert.throws(() => buildMessages([], { seat: 3, role: "villager" }, "wolf"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 3, role: "seer" }, "wolf"), /prompts:/);
+});
+
+test("狼王白天同样回看狼队密聊（wolfHistoryForDay isWolf 口径，裁定 3）", () => {
+  const log = [{ n: 1, seat: 2, text: "先刀 4 号" }];
+  const king = buildMessages(sampleHistory(), { seat: 6, role: "wolfking", wolves: [2, 5, 6], wolfChatLog: log }, "speak");
+  assert.ok(king[1].content.includes("狼队密聊记录"), "狼王白天拿到密聊回看");
+  const villager = buildMessages(sampleHistory(), { seat: 3, role: "villager", wolfChatLog: log }, "speak");
+  assert.ok(!villager[1].content.includes("狼队密聊记录"), "非狼座多塞密聊也进不了提示词");
+});
+
+test("guard 阶段按夜推导周期（NIGHT_PHASES 含 guard，§1.3）", () => {
+  const msgs = buildMessages(sampleHistory(), { seat: 3, role: "guard", guardLast: 7 }, "guard");
+  assert.ok(msgs[1].content.includes("第3夜"), "守卫请求按「第 N 夜」推导（最大 day=2 → 第 3 夜）");
+  assert.ok(msgs[1].content.includes("夜里你只知道"), "夜间保密口径对守卫生效");
+});
+
+test("foldHistory 新事件：上警/竞选发言/退水/警长票/当选折叠（附录 t-schema）", () => {
+  const h = [
+    { t: "deaths", day: 1, seats: [4] },
+    { t: "elect_run", day: 1, seat: 1, run: true },
+    { t: "elect_run", day: 1, seat: 3, run: false },
+    { t: "elect_speech", day: 1, seat: 1, text: "我是好人视角，警长给我。" },
+    { t: "elect_withdraw", day: 1, seat: 1, quit: false },
+    { t: "elect_vote", day: 1, voter: 2, target: 1 },
+    { t: "elect_vote", day: 1, voter: 5, target: null },
+    { t: "sheriff", day: 1, kind: "elected", seat: 1 },
+    { t: "speech", day: 1, seat: 6, text: "警长 1 号，我保留意见。" }
+  ];
+  const user = buildMessages(h, { seat: 6, role: "villager" }, "speak")[1].content;
+  assert.ok(user.includes("1 号上警。"));
+  assert.ok(user.includes("3 号不上警。"));
+  assert.ok(user.includes("1号（竞选发言）：我是好人视角"));
+  assert.ok(user.includes("1 号留下继续竞选。"));
+  assert.ok(user.includes("警长票：2号 → 1号"));
+  assert.ok(user.includes("警长票：5号 → 弃票"));
+  assert.ok(user.includes("1 号当选警长。"));
+  /* 竞选发言计入 speechSeen：首位常规发言者不带「最早发言者」分支 */
+  assert.ok(!user.includes("信息不足、需要再观察一轮"));
+  /* 竞选事件不死人：存活推导不受影响（仅 4 号夜死） */
+  assert.ok(user.includes("存活玩家：1、2、3、5、6、7、8、9 号"));
+});
+
+test("foldHistory：退水 / 无警长 / tie-pk / 警徽移交与撕毁折叠", () => {
+  const h = [
+    { t: "elect_withdraw", day: 1, seat: 7, quit: true },
+    { t: "sheriff", day: 1, kind: "tie-pk", pk: [3, 6] },
+    { t: "sheriff", day: 3, kind: "transfer", from: 3, to: 2 },
+    { t: "sheriff", day: 4, kind: "destroy", from: 2 },
+    { t: "sheriff", day: 2, kind: "none" },
+    { t: "sheriff", day: 2, kind: "no-voters" }
+  ];
+  const user = buildMessages(h, { seat: 9, role: "villager" }, "speak")[1].content;
+  assert.ok(user.includes("7 号退水（退出警长竞选）。"));
+  assert.ok(user.includes("警长竞选平票：3、6 号进入 PK 发言。"));
+  assert.ok(user.includes("3 号（原警长）把警徽移交给 2 号，2 号成为新警长。"));
+  assert.ok(user.includes("2 号（原警长）撕毁警徽，本局无警长。"));
+  assert.ok(user.includes("警长竞选无果，本局无警长。"));
+  assert.ok(user.includes("全员上警、无人可投票，本局无警长。"));
+  /* 非法 kind 直接抛错（白名单口径） */
+  assert.throws(
+    () => buildMessages([{ t: "sheriff", day: 1, kind: "boom" }], { seat: 3, role: "villager" }, "speak"),
+    /prompts:/
+  );
+});
+
+test("foldHistory：白痴放逐免死不入死亡名单；狼王翻牌文案（§1.5，ADR-0013）", () => {
+  const h = [
+    { t: "exile", day: 1, seat: 5, idiot: true },
+    { t: "hunter", day: 2, seat: 2, target: 8, role: "wolfking" },
+    { t: "hunter", day: 3, seat: 9, target: null, role: "wolfking" }
+  ];
+  const user = buildMessages(h, { seat: 3, role: "villager" }, "speak")[1].content;
+  assert.ok(user.includes("5 号翻牌白痴，放逐无效（存活但失去投票权）。"));
+  assert.ok(user.includes("2号翻牌狼王，开枪带走 8 号（无遗言、不翻牌）。"));
+  assert.ok(user.includes("9号翻牌狼王，放弃开枪。"));
+  /* 白痴没死（存活含 5）、狼王枪杀的 8 号死了；缺省 role 仍按猎人渲染（旧日志兼容） */
+  assert.ok(user.includes("存活玩家：1、2、3、4、5、6、7、9 号"));
+  const legacy = buildMessages([{ t: "hunter", day: 1, seat: 2, target: 8 }], { seat: 3, role: "villager" }, "speak")[1].content;
+  assert.ok(legacy.includes("2号翻牌猎人，开枪带走 8 号"));
+});
+
+test("竞选平票 tie-pk → ctx.electSeats 收窄 elect_vote（裁定 11）", () => {
+  const h = [{ t: "sheriff", day: 1, kind: "tie-pk", pk: [3, 6] }];
+  const card = { seat: 9, role: "villager", election: { candidates: [3, 6, 7], pk: [3, 6] } };
+  const pk = buildMessages(h, card, "elect_vote")[1].content;
+  assert.ok(pk.includes("你只能投 3、6 号，或弃票（skip）。"), "PK 轮用 electSeats 收窄而非全量候选");
+  /* 主轮（无 tie-pk 事件）用 roleCard.election.candidates */
+  const main = buildMessages([], { seat: 9, role: "villager", election: { candidates: [3, 6, 7] } }, "elect_vote")[1].content;
+  assert.ok(main.includes("你只能投 3、6、7 号，或弃票（skip）。"));
+  /* 都没有时退到聊天记录推导口径 */
+  const bare = buildMessages([], { seat: 9, role: "villager" }, "elect_vote")[1].content;
+  assert.ok(bare.includes("聊天记录里仍在台上的警长候选人"));
+});
+
+test("守卫私有字段 guardLast 与公开 sheriff / election 渲染（裁定 9/10）", () => {
+  /* 裁定 10：昨晚守护座位进守卫 system 私有段；null = 首夜 */
+  const a = buildMessages(sampleHistory(), { seat: 3, role: "guard", guardLast: 7 }, "speak");
+  assert.ok(a[0].content.includes("你昨晚守护了 7 号，今晚不可再守同一人"));
+  const g = buildMessages(sampleHistory(), { seat: 3, role: "guard", guardLast: 7 }, "guard");
+  assert.ok(g[1].content.includes("你昨晚守护了 7 号"), "guard 任务同步提醒连守限制");
+  const b = buildMessages([], { seat: 3, role: "guard", guardLast: null }, "speak");
+  assert.ok(b[0].content.includes("这是你第一晚守护"));
+  /* 裁定 9：当前警长进「当前局面」+ 1.5 票提示；无警长时不出该行 */
+  const c = buildMessages(sampleHistory(), { seat: 3, role: "villager", sheriff: 6 }, "speak")[1].content;
+  assert.ok(c.includes("当前警长是 6 号"));
+  assert.ok(c.includes("1.5 票"));
+  const d = buildMessages(sampleHistory(), { seat: 3, role: "villager" }, "speak")[1].content;
+  assert.ok(!d.includes("当前警长是"));
+  /* 白名单：非守卫带 guardLast 不渲染；非法值直接抛错 */
+  const e = buildMessages(sampleHistory(), { seat: 3, role: "villager", guardLast: 7 }, "speak");
+  assert.ok(!e[0].content.includes("你昨晚守护了"));
+  assert.throws(() => buildMessages([], { seat: 3, role: "guard", guardLast: 12 }, "guard"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 3, role: "villager", sheriff: 12 }, "speak"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 3, role: "villager", election: { candidates: [99] } }, "speak"), /prompts:/);
+  assert.throws(() => buildMessages([], { seat: 3, role: "villager", election: { candidates: "x" } }, "speak"), /prompts:/);
+});
+
+test("新任务输出格式：run/pass、quit/stay、警徽 skip=撕毁、守卫不可跳过（§2.6 / B2-1）", () => {
+  const join = buildMessages([], { seat: 3, role: "villager" }, "elect_join")[1].content;
+  assert.ok(join.includes("run（上警参加竞选）"));
+  assert.ok(join.includes("pass（不上警）"));
+  const wd = buildMessages([], { seat: 3, role: "villager" }, "elect_withdraw")[1].content;
+  assert.ok(wd.includes("quit（退水退出竞选）"));
+  assert.ok(wd.includes("stay（留下继续参选）"));
+  const bd = buildMessages([], { seat: 3, role: "villager" }, "badge")[1].content;
+  assert.ok(bd.includes("警徽移交给该玩家"));
+  assert.ok(bd.includes("skip（撕毁警徽）"));
+  /* 守卫不可空守：任务与格式都不给 skip 选项 */
+  const gv = buildMessages([], { seat: 3, role: "guard", guardLast: null }, "guard")[1].content;
+  assert.ok(gv.includes("座位号数字"));
+  assert.ok(!gv.includes("skip"), "守卫必须选人，不得出现 skip 字样");
+  /* 裁定 5：竞选发言走发言格式（否则被压成座位号） */
+  for (const phase of ["elect_campaign", "elect_pk_speak"]) {
+    const m = buildMessages([], { seat: 3, role: "villager" }, phase)[1].content;
+    assert.ok(m.includes("100–200 字"), phase + " 应使用发言格式");
+  }
+  const evt = buildMessages([], { seat: 3, role: "villager" }, "elect_vote")[1].content;
+  assert.ok(evt.includes("座位号数字，或 skip"));
+});
+
+test("digest 摘要行透传警长信息（裁定 9②：老天数的警长信息不随压缩蒸发）", () => {
+  const h = [
+    { t: "digest", day: 1, text: "昨晚 4 号死亡，1 号当选警长", dead: [4] },
+    { t: "deaths", day: 2, seats: [7] }
+  ];
+  const user = buildMessages(h, { seat: 3, role: "villager" }, "speak")[1].content;
+  assert.ok(user.includes("【第1天摘要】"));
+  assert.ok(user.includes("1 号当选警长"), "digest 文本里的警长行原样透传");
+  assert.ok(user.includes("存活玩家：1、2、3、5、6、8、9 号"));
+});
+
+test("新阶段 PHASES 值齐备（裁定 6 的 7 值；SPEECH_PHASES 裁定 5）", () => {
+  for (const p of ["guard", "elect_join", "elect_withdraw", "elect_campaign", "elect_pk_speak", "elect_vote", "badge"]) {
+    assert.ok(PHASES.indexOf(p) >= 0, "PHASES 缺 " + p);
+  }
+  /* 发言类阶段命名口径：竞选发言与 pk_speak 同走 SPEECH_FORMAT（经上一用例的格式断言覆盖） */
+  const cmp = buildMessages([], { seat: 3, role: "villager" }, "elect_campaign");
+  assert.ok(cmp[1].content.includes("【输出格式】只输出发言正文本身"), "竞选发言用发言输出格式");
 });
 
 /* ---------- 首日发言分支 + 输出预算钳制 + 响应提取（2026-10-03 体验修复） ---------- */

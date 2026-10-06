@@ -477,3 +477,56 @@ input {
   min-height: var(--min-tap);
 }
 .wolf-vote-row .btn { min-height: var(--min-tap); flex: none; }
+
+/* ---------- 板子选择卡（§3 / ADR-0013）：单机屏与联机大厅房主同款，热区 ≥44px ---------- */
+.board-wrap { display: flex; flex-direction: column; gap: 6px; margin: 0 0 12px; min-width: 0; }
+.board-grid { display: flex; flex-direction: column; gap: 8px; } /* 单列 */
+.board-card {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-height: var(--min-tap);
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  min-width: 0;
+}
+.board-card.is-selected { border-color: var(--accent); background: #2a2415; } /* 选中态同 .target-btn.is-selected */
+.board-name { font-weight: 600; }
+.board-intro { font-size: 13px; color: var(--muted); overflow-wrap: anywhere; }
+
+/* ---------- 阶段区竞选公开信息（§2.5 / ADR-0014）：阶段条内第二行，防挤占第一行 ---------- */
+.phase-banner { flex-wrap: wrap; }
+.phase-election { flex-basis: 100%; font-size: 13px; color: var(--muted); font-weight: 400; }
+
+/* ---------- 战绩与复盘（§3.3 / ADR-0015）：汇总表 + 存档列表 + 复盘详情 ---------- */
+#archive-stats summary { cursor: pointer; font-weight: 600; font-size: 14px; }
+.stats-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.stats-table th,
+.stats-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.stats-table th { color: var(--muted); font-weight: 400; }
+.stats-me td { color: var(--accent); } /* 「我」按当前昵称弱匹配高亮（§3.3 口径） */
+.archive-list { display: flex; flex-direction: column; gap: 8px; margin: 0 0 12px; }
+.archive-item {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-height: var(--min-tap);
+  padding: 10px 12px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  min-width: 0;
+}
+.archive-item-main { font-weight: 600; overflow-wrap: anywhere; }
+.archive-item-sub { font-size: 13px; color: var(--muted); }
+#archive-back { margin: 0 0 12px; }

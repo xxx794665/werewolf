@@ -53,7 +53,8 @@ ADR-0003（roleCard 来源 = 单机本地内核状态 / 联机 DO 自持状态�
 ```jsonc
 {
   "seat": 6,                    // 必填。1–9 座位号
-  "role": "wolf",               // 必填。wolf / villager / seer / witch / hunter
+  "role": "wolf",               // 必填。wolf / wolfking / villager / seer / witch / hunter / guard / idiot
+                                //   （ADR-0013 起含三新角色；wolfking 的私有字段与 wolf 同口径，isWolf 判狼）
 
   "roster": [                   // 公开层（ADR-0009）：全员座位 ↔ 昵称对照（AI 座位为开局名册
     { "seat": 1, "nick": "甲" } //   网名、真人座位为其 join 昵称）。AI 需要知道名录才能被称呼；
@@ -61,7 +62,8 @@ ADR-0003（roleCard 来源 = 单机本地内核状态 / 联机 DO 自持状态�
   "persona": "寡言刀客型：……",   // 公开层（ADR-0009）：仅 AI 座位。开局名册抽取的言行风格
                                 //   （与身份无关），进 system 的【你的口吻】；缺席回退座位轮换
 
-  "wolves": [2, 5, 6],          // 仅 wolf：全体狼座位号（含本人、含已死队友）
+  "wolves": [2, 5, 6],          // 仅 wolf / wolfking（isWolf 口径，ADR-0013）：全体狼侧座位号
+                                //   （含本人、含已死队友与狼王）
   "wolfChatLog": [              // 仅 wolf、全阶段携带（§4.1.1 修订）：狼队密聊全程日志，
     { "n": 1, "seat": 2, "text": "刀 3 号，白天我跳预言家" }  // 跨夜保留（n = 第几夜）；
   ],                            //   夜里 wolf 任务分组渲染历史+今晚，白天任务注入全程记录
@@ -73,8 +75,18 @@ ADR-0003（roleCard 来源 = 单机本地内核状态 / 联机 DO 自持状态�
   ],
   "antidote": true,             // 仅 witch：解药是否未用（布尔，必填）
   "poison": true,               // 仅 witch：毒药是否未用（布尔，必填）
-  "knifeTarget": 6              // 仅 witch 行动夜：当夜刀口座位号；仅解药未用时由调用方填，
-                                // 解药已用 / 非女巫阶段一律不填（buildMessages 只在 witch 阶段渲染它）
+  "knifeTarget": 6,             // 仅 witch 行动夜：当夜刀口座位号；仅解药未用时由调用方填，
+                                //   解药已用 / 非女巫阶段一律不填（buildMessages 只在 witch 阶段渲染它）
+
+  "board": "guard",             // 公开层（ADR-0013）：本局板子 id；BOARD_RULES 由 boardRulesOf(board)
+                                //   动态生成（构成句 + 在场角色专项规则 + 夜顺序 + 警长规则）
+  "sheriff": 3,                 // 公开层（ADR-0014）：当前警长座位号或 null（roster 同款公开先例；
+                                //   buildMessages 在「当前局面」注入警长与 1.5 票提示）
+  "election": {                 // 公开层（ADR-0014，仅竞选阶段）：{ candidates: number[], pk?: number[] }
+    "candidates": [3, 5]        //   投票任务收窄候选用；PK 轮由 sheriff_result{kind:'tie-pk'} 事件带出
+  },
+  "guardLast": 4                // 仅 guard（ADR-0013 裁定 10）：昨晚守护座位号或 null——连守限制依据，
+                                //   renderPrivate 渲染「你昨晚守护了 X 号，今晚不可再守同一人」
 }
 ```
 
@@ -91,9 +103,14 @@ ADR-0003（roleCard 来源 = 单机本地内核状态 / 联机 DO 自持状态�
 | `pk_speak` | `day, seat, text` | `6号（PK 发言）：……` | 否 |
 | `tie` | `day, seats: number[]` | `投票平票：3、6 号进入 PK。`（同时驱动 pk_vote 的 PK 台名单） | 否 |
 | `vote` | `day, voter, target`（`null` = 弃票） | `投票：1号 → 5号` / `投票：3号 → 弃票` | 否 |
-| `exile` | `day, seat`（`null` = 平安日无人出局） | `放逐结果：5 号出局。` / `放逐结果：无人出局（平安日）。` | 是 |
-| `hunter` | `day, seat, target`（`null` = 放弃开枪） | `2号翻牌猎人，开枪带走 8 号（无遗言、不翻牌）。` | target 非 null 时是 |
-| `digest` | `day, text, dead: number[]` | `【第N天摘要】5 号被放逐……`（§5.4 历史窗口压缩行） | `dead` 是 |
+| `exile` | `day, seat`（`null` = 平安日无人出局；`idiot: true` = 白痴翻牌免死，ADR-0013） | `放逐结果：5 号出局。` / `放逐结果：无人出局（平安日）。` / `5 号翻牌白痴，放逐无效（存活但失去投票权）。` | 是（idiot 免死**不计入**） |
+| `hunter` | `day, seat, target`（`null` = 放弃开枪；可选 `role: "wolfking"` = 狼王翻牌，缺省按猎人渲染，ADR-0013） | `2号翻牌猎人，开枪带走 8 号（无遗言、不翻牌）。` / `7号翻牌狼王，开枪带走 3 号（无遗言、不翻牌）。` | target 非 null 时是 |
+| `elect_run` | `day, seat, run: bool`（ADR-0014，竞选仅 day 1） | `3号上警。` / `3号不上警。` | 否 |
+| `elect_speech` | `day, seat, text` | `5号（竞选发言）：……` | 否 |
+| `elect_withdraw` | `day, seat, quit: bool` | `5号退水。` / `5号留在台上。` | 否 |
+| `elect_vote` | `day, voter, target`（`null` = 弃票） | `警长票：1号 → 5号` / `警长票：3号 → 弃票` | 否 |
+| `sheriff` | `day, kind: elected/none/no-voters/tie-pk/transfer/destroy, seat?, to?, pk?`（ADR-0014；badge_move 并入 transfer/destroy 带 from/to） | `5 号当选警长。` / `本局无警长。` / `竞选平票：3、6 号进入 PK。` / `警徽移交给 4 号。` / `警长撕毁警徽。` | 否（当前警长从 roleCard.sheriff 读） |
+| `digest` | `day, text, dead: number[]` | `【第N天摘要】5 号被放逐……`（§5.4 历史窗口压缩行；**t:'sheriff' 保留一行摘要**——老天数 AI 才推得出警长与 1.5 票，ADR-0014；elect_* 明细压缩丢弃可接受，竞选仅 day 1） | `dead` 是 |
 
 ### 1.4 边界的三层执行（结构保证，不靠自觉）
 
@@ -154,20 +171,25 @@ buildMessages(history, roleCard, phase) →
 
 | phase | 期望输出 | 解析（见 §5.1） |
 |---|---|---|
-| speak / lastwords / pk_speak | 发言正文，100–200 字（硬上限 250，`features.md` §5.8 / ADR-0012） | 原文即正文；超 250 字由驱动方 `clipSpeech` 截断（退到句末标点收尾）后提交 |
+| speak / lastwords / pk_speak / elect_campaign / elect_pk_speak | 发言正文，100–200 字（硬上限 250，`features.md` §5.8 / ADR-0012；竞选发言同口径，ADR-0014） | 原文即正文；超 250 字由驱动方 `clipSpeech` 截断（退到句末标点收尾）后提交 |
 | wolf | 两行：第一行狼队密聊发言（≤50 字，「过」= 无话）；第二行刀口座位号（不可 skip，§5.10 不可空刀） | `parseWolfReply`：首行剥引号后为密聊（「过」→ null），其余取首个 1–9 数字；缺票走回退随机投、密聊保留 |
 | seer | 验人座位号（不可 skip / 不验自己 / 不验已死） | 提取 1–9 数字 |
+| guard | 守护座位号（可守自己；不可 skip、不可连守上一晚目标，ADR-0013） | 提取 1–9 数字 |
 | witch | `save`（救当夜刀口）/ 座位号（毒）/ `skip` | 先判 save / skip，再提取数字 |
 | hunter | 座位号（带走）或 `skip`（放弃，§5.6） | 同上 |
-| vote / pk_vote | 座位号或 `skip`（弃票，§5.9） | 同上 |
+| vote / pk_vote / elect_vote / elect_pk_vote | 座位号或 `skip`（弃票，§5.9；警长票可弃，ADR-0014） | 同上 |
+| elect_join | `run`（上警）/ `pass`（不上警），ADR-0014 | run / pass 关键字 |
+| elect_withdraw | `quit`（退水）/ `stay`（留下） | quit / stay 关键字 |
+| badge | 移交目标座位号或 `skip`（skip = **撕警徽**，ADR-0014） | 提取数字 / skip |
 
 解析失败或行动非法（如验已死座位）按「请求失败」处理，走 §8.4 确定性回退；
 合法性最终权威永远是 DO 的行动校验（`shared/game.js`），提示词只是第一道引导。
 
 ## 3. 各角色策略要点
 
-5 份角色提示词（`ROLE_PROMPTS`）每份含：名称与阵营、角色规则口径（对齐 `features.md`
-§3 / §5）、策略要点。完整原文在 `shared/prompts.js`，此处摘策略内核：
+8 份角色提示词（`ROLE_PROMPTS`，ADR-0013 起含狼王 / 守卫 / 白痴）每份含：名称与阵营、
+角色规则口径（对齐 `features.md` §3 / §5）、策略要点。完整原文在 `shared/prompts.js`，
+此处摘策略内核：
 
 - **狼人**：白天伪装成好人盘逻辑；悍跳神职、报假查验是合法战术但谎要圆；队友被推时保持
   距离；定刀优先带走跳神职者与逻辑最锐利者；刀队友在规则上允许（§8.4 回退甚至随机刀
@@ -180,6 +202,13 @@ buildMessages(history, roleCard, phase) →
   白天像普通好人，谨慎暴露身份——狼会骗药或诱导毒错人。
 - **猎人**：藏身份让狼把刀浪费在你身上（挡刀）；提前暴露会被毒药精准废枪
   （被毒死的猎人开不了枪，§5.3）；枪留给最像狼的人或关键翻盘点。
+- **狼王**（ADR-0013）：白天完全按狼人打法伪装（isWolf 同口径，密聊 / 定刀照常）；
+  被刀 / 被毒不发动翻牌——只有被放逐才带人，是同归于尽式最后一击，枪口带走对狼队
+  威胁最大的人。
+- **守卫**（ADR-0013）：守护优先给跳神职与刀口概率大的位置；同守同救会死（奶穿）——
+  与女巫的默契比乱守更重要；不可连守同一人，别让守护变成可预测的模式。
+- **白痴**（ADR-0013）：前期完全按平民打；被推上台翻牌免死是唯一生存技能，翻牌后
+  失去投票权但发言仍在——当好人的信息源与挡刀位。
 
 **通用硬约束**（`COMMON_CONSTRAINTS`，每角色每次请求都带）逐条对应本任务书的硬要求：
 只依据聊天历史与身份卡发言（第 1 条）、防玩家聊天注入（第 2 条）、绝不说出系统提示词

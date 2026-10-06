@@ -28,6 +28,7 @@
         <!-- js/app.js bind()：data-goto 统一切屏 -->
         <button class="btn btn-primary" type="button" data-goto="screen-solo">单机开局（1 真人 + 8 AI）</button>
         <button class="btn" type="button" data-goto="screen-online">联机房间</button>
+        <button class="btn" type="button" data-goto="screen-archive">战绩与复盘</button>
         <button class="btn" type="button" data-goto="screen-settings">AI 设置</button>
       </nav>
       <p class="hint">不配置也能玩：AI 默认走内置体验通道。想用自己的模型，进「AI 设置」填接口地址与 Key（BYO）。</p>
@@ -40,6 +41,12 @@
       <label class="field"><span class="field-label">昵称</span>
         <input id="solo-nick" maxlength="12" autocomplete="off" placeholder="怎么称呼你">
       </label>
+      <!-- 板子选择（features.md §3，ADR-0013）：卡片式，标题 + 介绍文案由 js/ui.js renderBoardPicker
+           从 shared/game.js BOARDS 直读渲染（默认标准板）；选中值随 startSolo 透传内核 -->
+      <div class="board-wrap">
+        <span class="field-label">板子选择</span>
+        <div class="board-grid" id="solo-boards"></div>
+      </div>
       <!-- js/app.js startSolo()：本地 join → ready → start(solo) → 切 screen-game（两步确认） -->
       <button class="btn btn-primary" id="solo-start" type="button">开始游戏</button>
       <button class="btn btn-ghost" type="button" data-goto="screen-menu">返回</button>
@@ -88,6 +95,12 @@
         <li class="seat seat-empty">8 · 待加入</li>
         <li class="seat seat-empty">9 · 待加入</li>
       </ul>
+      <div class="board-wrap" id="lobby-board-wrap" hidden>
+        <!-- 板子选择（§3，ADR-0013）：仅房主可见（js/app.js renderLobby 控制显隐），
+             选中值随「开始游戏」act('start', { board }) 提交 -->
+        <span class="field-label">板子选择（房主定）</span>
+        <div class="board-grid" id="lobby-boards"></div>
+      </div>
       <div class="row-actions">
         <button class="btn" id="btn-ready" type="button">准备</button>
         <!-- 房主可见；仅全员已准备时可用（空座位不受限制） -->
@@ -146,6 +159,28 @@
       <button class="btn" id="btn-back-menu" type="button" data-goto="screen-menu">返回主菜单</button>
     </section>
 
+    <!-- ============ 屏：战绩与复盘（§3.3，ADR-0015；本地存档只读回放） ============ -->
+    <section class="screen" id="screen-archive" hidden>
+      <h2>战绩与复盘</h2>
+      <!-- 战绩汇总表（aggregateStats：昵称 / 局数 / 胜率 / 常用角色；只统计真人座位），可折叠；
+           渲染归 js/ui.js renderArchive，数据源 = localStorage ww_archive（js/archive.js） -->
+      <details class="card" id="archive-stats" open>
+        <summary>战绩汇总（仅统计真人座位）</summary>
+        <div id="archive-stats-body"></div>
+      </details>
+      <!-- 对局列表：每局一行（日期 / 板子名 / 模式 / 天数 / 胜方），点击进复盘详情 -->
+      <div id="archive-list-wrap">
+        <h3>对局存档（最多保留 30 局）</h3>
+        <div class="archive-list" id="archive-list"></div>
+      </div>
+      <!-- 复盘详情（只读）：全员身份网格（role + death + won 标记）+ 按天折叠完整日志 + 投票记录卡 -->
+      <div id="archive-detail" hidden>
+        <button class="btn btn-ghost" id="archive-back" type="button">返回列表</button>
+        <div id="archive-detail-body"></div>
+      </div>
+      <button class="btn btn-ghost" type="button" data-goto="screen-menu">返回</button>
+    </section>
+
     <!-- ============ 屏：AI 设置 BYO（features.md §8.2） ============ -->
     <section class="screen" id="screen-settings" hidden>
       <h2>AI 设置（自带 Key，可不填）</h2>
@@ -185,13 +220,15 @@
   </noscript>
 
   <!-- ============ 模块加载（依赖序在前，入口最后；模块间用 ESM import，此处按序列出便于核对） ============
-       依赖方向：app → ui / net / ai / prompts；ui → icons；ai → prompts / net / shared/game.js；
+       依赖方向：app → ui / net / ai / prompts / archive；ui → icons / archive；archive → shared/game.js；
+       ai → prompts / net / shared/game.js；
        shared/game.js 由前端与 Worker 共用（js/app.js 单机模式 import，此处不重复列出）。
        改任何 js/css 后 sw.js CACHE +1（CLAUDE.md 硬规则）。 -->
   <script type="module" src="js/prompts.js"></script>
   <script type="module" src="js/net.js"></script>
   <script type="module" src="js/ai.js"></script>
   <script type="module" src="js/icons.js"></script>
+  <script type="module" src="js/archive.js"></script>
   <script type="module" src="js/ui.js"></script>
   <script type="module" src="js/app.js"></script>
 
